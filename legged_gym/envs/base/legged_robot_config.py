@@ -13,7 +13,7 @@ class LeggedRobotCfg(BaseConfig):
 
     class terrain:
         evaluation_mode = False  # if True: evaluate the trained policy
-        mesh_type = 'trimesh' # "heightfield" # none, plane, heightfield or trimesh
+        mesh_type = 'plane' # "heightfield" # none, plane, heightfield or trimesh
         horizontal_scale = 0.1 # [m]
         vertical_scale = 0.005 # [m]
         border_size = 25 # [m]
@@ -38,8 +38,8 @@ class LeggedRobotCfg(BaseConfig):
         slope_treshold = 0.75 # slopes above this threshold will be corrected to vertical surfaces
         random_reset = True
         dummy_normal = False
-        measure_heights_in_sim = True
-        # measure_heights_in_sim = False
+        # measure_heights_in_sim = True
+        measure_heights_in_sim = False
 
 
     class commands:

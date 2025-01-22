@@ -7,15 +7,15 @@ class G1RoughCfg( LeggedRobotCfg ):
            'left_hip_yaw_joint' : 0. ,   
            'left_hip_roll_joint' : 0,               
            'left_hip_pitch_joint' : -0.1,         
-           'left_knee_joint' : 0.3,       
-        #    'left_knee_joint' : 0.0,       
+        #    'left_knee_joint' : 0.3,       
+           'left_knee_joint' : 0.0,       
            'left_ankle_pitch_joint' : -0.2,     
            'left_ankle_roll_joint' : 0,     
            'right_hip_yaw_joint' : 0., 
            'right_hip_roll_joint' : 0, 
            'right_hip_pitch_joint' : -0.1,                                       
-           'right_knee_joint' : 0.3,                                             
-        #    'right_knee_joint' : 0.0,                                             
+        #    'right_knee_joint' : 0.3,                                             
+           'right_knee_joint' : 0.0,                                             
            'right_ankle_pitch_joint': -0.2,                              
            'right_ankle_roll_joint' : 0,       
            'torso_joint' : 0.
@@ -25,7 +25,7 @@ class G1RoughCfg( LeggedRobotCfg ):
         num_observations = 47 
         # num_observations = 47 + 26 + 187
         # num_observations = 77
-        num_privileged_obs = 50 + 26 + 187
+        num_privileged_obs = 50 + 26
         # num_privileged_obs = 50
 
         num_actions = 12
