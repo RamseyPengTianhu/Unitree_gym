@@ -83,7 +83,7 @@ def play(args):
 
     env_cfg.env.test = True
     robot_index = 0  # Index of the robot to track
-    stop_state_log = 1000  # Number of steps for logging
+    stop_state_log = 500  # Number of steps for logging
     joint_index = 4
 
 
@@ -162,7 +162,7 @@ def play(args):
             logger.print_rewards()
 
     # Save logged states
-    save_states_to_csv(logger.state_log, env.dt, '/home/tianhu/unitree_rl_gym/data/g1_sim')
+    save_states_to_csv(logger.state_log, env.dt, '/home/tianhu/unitree_rl_gym/data/g1_sim/straight_knee')
 
 
 if __name__ == '__main__':

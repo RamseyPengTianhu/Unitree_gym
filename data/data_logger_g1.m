@@ -1,14 +1,14 @@
 % Define the file paths
-timeFile = '/home/tianhu/unitree_rl_gym/data/g1_sim/time.csv';
-Left_knee_pos_File = '/home/tianhu/unitree_rl_gym/data/g1_sim/Left_knee_pos.csv';
-Right_knee_pos_File = '/home/tianhu/unitree_rl_gym/data/g1_sim/Right_knee_pos.csv';
-contact_force_File = '/home/tianhu/unitree_rl_gym/data/g1_sim/contact_forces_z.csv';
-base_linear_x_File = '/home/tianhu/unitree_rl_gym/data/g1_sim/base_vel_x.csv';
-base_linear_y_File = '/home/tianhu/unitree_rl_gym/data/g1_sim/base_vel_y.csv';
-base_yaw_File = '/home/tianhu/unitree_rl_gym/data/g1_sim/base_vel_yaw.csv';
-Command_base_linear_x_File = '/home/tianhu/unitree_rl_gym/data/g1_sim/command_x.csv';
-Command_base_linear_y_File = '/home/tianhu/unitree_rl_gym/data/g1_sim/command_y.csv';
-Command_base_yaw_File = '/home/tianhu/unitree_rl_gym/data/g1_sim/command_yaw.csv';
+timeFile = '/home/tianhu/unitree_rl_gym/data/g1_sim/straight_knee/time.csv';
+Left_knee_pos_File = '/home/tianhu/unitree_rl_gym/data/g1_sim/straight_knee/Left_knee_pos.csv';
+Right_knee_pos_File = '/home/tianhu/unitree_rl_gym/data/g1_sim/straight_knee/Right_knee_pos.csv';
+contact_force_File = '/home/tianhu/unitree_rl_gym/data/g1_sim/straight_knee/contact_forces_z.csv';
+base_linear_x_File = '/home/tianhu/unitree_rl_gym/data/g1_sim/straight_knee/base_vel_x.csv';
+base_linear_y_File = '/home/tianhu/unitree_rl_gym/data/g1_sim/straight_knee/base_vel_y.csv';
+base_yaw_File = '/home/tianhu/unitree_rl_gym/data/g1_sim/straight_knee/base_vel_yaw.csv';
+Command_base_linear_x_File = '/home/tianhu/unitree_rl_gym/data/g1_sim/straight_knee/command_x.csv';
+Command_base_linear_y_File = '/home/tianhu/unitree_rl_gym/data/g1_sim/straight_knee/command_y.csv';
+Command_base_yaw_File = '/home/tianhu/unitree_rl_gym/data/g1_sim/straight_knee/command_yaw.csv';
 
 % Load the data
 time = readmatrix(timeFile);
