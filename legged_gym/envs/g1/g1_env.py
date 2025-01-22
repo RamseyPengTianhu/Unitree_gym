@@ -65,7 +65,22 @@ class G1Robot(LeggedRobot):
         
         return super()._post_physics_step_callback()
     
-    
+    def compute_obs_buf(self):
+        # imu_obs = torch.stack((self.roll, self.pitch), dim=1)
+        imu_obs = self.rpy[:,0:1]
+        self.yaw = self.rpy[:,2]
+        return torch.cat((#motion_id_one_hot,
+                            self.base_ang_vel  * self.obs_scales.ang_vel,   #[1,3]
+                            self.rpy[:,0:1],    #[1,2]
+                            torch.sin(self.yaw - self.target_yaw)[:, None],  #[1,1]
+                            torch.cos(self.yaw - self.target_yaw)[:, None],  #[1,1]
+                            # self.target_pos_rel,  
+                            self.reindex((self.dof_pos - self.default_dof_pos_all) * self.obs_scales.dof_pos),
+                            self.reindex(self.dof_vel * self.obs_scales.dof_vel),
+                            self.reindex(self.action_history_buf[:, -1]),
+                            self.reindex_feet(self.contact_filt.float()*0-0.5),
+                            ),dim=-1)
+
     def compute_observations(self):
         """ Computes observations
         """
