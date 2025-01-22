@@ -93,7 +93,7 @@ class G1RoughCfg( LeggedRobotCfg ):
             contact_no_vel = -0.2
             feet_swing_height = -20.0
             contact = 0.18
-            straight_knee = 0.2
+            straight_knee = 0.5
 
 class G1RoughCfgPPO( LeggedRobotCfgPPO ):
     class policy:
