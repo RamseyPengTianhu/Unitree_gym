@@ -1,0 +1,103 @@
+% Define the file paths
+timeFile = '/home/tianhu/unitree_rl_gym/data/g1_sim/time.csv';
+Left_knee_pos_File = '/home/tianhu/unitree_rl_gym/data/g1_sim/Left_knee_pos.csv';
+Right_knee_pos_File = '/home/tianhu/unitree_rl_gym/data/g1_sim/Right_knee_pos.csv';
+contact_force_File = '/home/tianhu/unitree_rl_gym/data/g1_sim/contact_forces_z.csv';
+base_linear_x_File = '/home/tianhu/unitree_rl_gym/data/g1_sim/base_vel_x.csv';
+base_linear_y_File = '/home/tianhu/unitree_rl_gym/data/g1_sim/base_vel_y.csv';
+base_yaw_File = '/home/tianhu/unitree_rl_gym/data/g1_sim/base_vel_yaw.csv';
+Command_base_linear_x_File = '/home/tianhu/unitree_rl_gym/data/g1_sim/command_x.csv';
+Command_base_linear_y_File = '/home/tianhu/unitree_rl_gym/data/g1_sim/command_y.csv';
+Command_base_yaw_File = '/home/tianhu/unitree_rl_gym/data/g1_sim/command_yaw.csv';
+
+% Load the data
+time = readmatrix(timeFile);
+Left_knee_pos = readmatrix(Left_knee_pos_File);
+Right_knee_pos = readmatrix(Right_knee_pos_File);
+contact_force = readmatrix(contact_force_File);
+base_linear_x = readmatrix(base_linear_x_File);
+base_linear_y = readmatrix(base_linear_y_File);
+base_yaw = readmatrix(base_yaw_File);
+Command_base_linear_x = readmatrix(Command_base_linear_x_File);
+Command_base_linear_y = readmatrix(Command_base_linear_y_File);
+Command_base_yaw = readmatrix(Command_base_yaw_File);
+
+% Ensure all vectors have matching dimensions
+minLength = min([length(time), length(Left_knee_pos), length(Right_knee_pos), ...
+                 length(contact_force), length(base_linear_x), length(base_linear_y), ...
+                 length(base_yaw), length(Command_base_linear_x), ...
+                 length(Command_base_linear_y), length(Command_base_yaw)]);
+             
+time = time(1:minLength);
+Left_knee_pos = Left_knee_pos(1:minLength);
+Right_knee_pos = Right_knee_pos(1:minLength);
+contact_force = contact_force(1:minLength);
+base_linear_x = base_linear_x(1:minLength);
+base_linear_y = base_linear_y(1:minLength);
+base_yaw = base_yaw(1:minLength);
+Command_base_linear_x = Command_base_linear_x(1:minLength);
+Command_base_linear_y = Command_base_linear_y(1:minLength);
+Command_base_yaw = Command_base_yaw(1:minLength);
+
+% Create plots
+figure;
+
+% Plot knee positions
+subplot(3, 2, 1);
+plot(time, Left_knee_pos, 'b', 'DisplayName', 'Left Knee');
+hold on;
+plot(time, Right_knee_pos, 'r', 'DisplayName', 'Right Knee');
+xlabel('Time (s)');
+ylabel('Knee Position');
+title('Knee Positions');
+legend;
+grid on;
+
+% Plot contact forces
+subplot(3, 2, 2);
+plot(time, contact_force, 'k');
+xlabel('Time (s)');
+ylabel('Contact Force (z)');
+title('Contact Forces');
+grid on;
+
+% Plot base linear velocity (x, y)
+subplot(3, 2, 3);
+plot(time, base_linear_x, 'b', 'DisplayName', 'Base Vel X');
+hold on;
+plot(time, base_linear_y, 'r', 'DisplayName', 'Base Vel Y');
+xlabel('Time (s)');
+ylabel('Linear Velocity (m/s)');
+title('Base Linear Velocities');
+legend;
+grid on;
+
+% Plot base yaw velocity
+subplot(3, 2, 4);
+plot(time, base_yaw, 'g');
+xlabel('Time (s)');
+ylabel('Yaw Velocity (rad/s)');
+title('Base Yaw Velocity');
+grid on;
+
+% Plot command linear velocities (x, y)
+subplot(3, 2, 5);
+plot(time, Command_base_linear_x, 'b', 'DisplayName', 'Command Vel X');
+hold on;
+plot(time, Command_base_linear_y, 'r', 'DisplayName', 'Command Vel Y');
+xlabel('Time (s)');
+ylabel('Command Linear Velocity (m/s)');
+title('Command Linear Velocities');
+legend;
+grid on;
+
+% Plot command yaw velocity
+subplot(3, 2, 6);
+plot(time, Command_base_yaw, 'm');
+xlabel('Time (s)');
+ylabel('Command Yaw Velocity (rad/s)');
+title('Command Yaw Velocity');
+grid on;
+
+% Adjust layout
+sgtitle('Simulation Data Plots');
