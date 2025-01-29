@@ -1,6 +1,8 @@
 import numpy as np
 from collections import defaultdict
 from multiprocessing import Process, Value
+import matplotlib.pyplot as plt
+
 
 class Logger:
     def __init__(self, dt):

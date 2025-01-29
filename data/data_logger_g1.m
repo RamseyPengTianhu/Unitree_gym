@@ -27,7 +27,7 @@ Left_foot_force = contact_force(:, 1);
 Right_foot_force = contact_force(:, 2);
 
 % Remove data for the first 0.5 seconds
-valid_indices = time >= 0.5;
+valid_indices = time >= 5;
 time = time(valid_indices);
 Left_knee_pos = Left_knee_pos(valid_indices);
 Right_knee_pos = Right_knee_pos(valid_indices);

@@ -46,6 +46,12 @@ def set_seed(seed):
     torch.cuda.manual_seed(seed)
     torch.cuda.manual_seed_all(seed)
 
+def get_axis_params(value, axis_idx):
+    """Utility to return a list where one index has a specific value and others are 0."""
+    params = [0.0, 0.0, 0.0]
+    params[axis_idx] = value
+    return params
+
 def parse_sim_params(args, cfg):
     # code from Isaac Gym Preview 2
     # initialize sim params

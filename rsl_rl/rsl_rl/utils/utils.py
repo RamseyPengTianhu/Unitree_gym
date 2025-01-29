@@ -67,5 +67,15 @@ def split_and_pad_trajectories(tensor, dones):
 def unpad_trajectories(trajectories, masks):
     """ Does the inverse operation of  split_and_pad_trajectories()
     """
+
+    # print("=== Diagnostics: unpad_trajectories ===")
+    # print("Trajectories shape:", trajectories.shape)  # Example: [370, 23, 64]
+    # print("Masks shape:", masks.shape)  # Example: [370, 24]
+
+    # # Check if shapes align
+    # if trajectories.shape[1] != masks.shape[1]:
+    #     print("Mismatch detected! Adjusting mask shape...")
+    #     print(f"Trajectories timesteps: {trajectories.shape[1]}, Masks timesteps: {masks.shape[1]}")
+    
     # Need to transpose before and after the masking to have proper reshaping
     return trajectories.transpose(1, 0)[masks.transpose(1, 0)].view(-1, trajectories.shape[0], trajectories.shape[-1]).transpose(1, 0)

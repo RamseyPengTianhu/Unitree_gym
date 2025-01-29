@@ -3,6 +3,9 @@ from legged_gym.envs.base.legged_robot import LeggedRobot
 
 from isaacgym.torch_utils import *
 from isaacgym import gymtorch, gymapi, gymutil
+from legged_gym.utils.math import quat_apply_yaw, wrap_to_pi, torch_rand_sqrt_float, euler_from_quat
+from legged_gym.utils.isaacgym_utils import get_euler_xyz as get_euler_xyz_in_tensor
+
 import torch
 
 class G1Robot(LeggedRobot):
@@ -17,8 +20,8 @@ class G1Robot(LeggedRobot):
         Returns:
             [torch.Tensor]: Vector of scales used to multiply a uniform distribution in [-1, 1]
         """
-        # noise_vec = torch.zeros_like(self.obs_buf[0])
-        noise_vec = torch.zeros(47, device = self.device)
+        noise_vec = torch.zeros_like(self.obs_buf[0])
+        # noise_vec = torch.zeros(47, device = self.device)
         self.add_noise = self.cfg.noise.add_noise
         noise_scales = self.cfg.noise.noise_scales
         noise_level = self.cfg.noise.noise_level
@@ -41,10 +44,19 @@ class G1Robot(LeggedRobot):
         self.feet_state = self.rigid_body_states_view[:, self.feet_indices, :]
         self.feet_pos = self.feet_state[:, :, :3]
         self.feet_vel = self.feet_state[:, :, 7:10]
+
+    
+        
         
     def _init_buffers(self):
         super()._init_buffers()
         self._init_foot()
+        self.upper_body_rpy = torch.zeros(self.num_envs,4)
+        self._init_upper_body()
+        self.base_orn_rp = self.get_body_orientation() # [r, p]
+        self.com = self.calculate_center_of_mass()
+        
+
 
     def update_feet_state(self):
         self.gym.refresh_rigid_body_state_tensor(self.sim)
@@ -52,9 +64,94 @@ class G1Robot(LeggedRobot):
         self.feet_state = self.rigid_body_states_view[:, self.feet_indices, :]
         self.feet_pos = self.feet_state[:, :, :3]
         self.feet_vel = self.feet_state[:, :, 7:10]
+
+
+    def _extract_upper_body_rpy(self):
+        """
+        Extract roll, pitch, and yaw for the upper body from the rigid body states.
+
+        Returns:
+            tuple: Roll, pitch, and yaw as NumPy floats.
+        """
+        # self.upper_body_index = [13,14]
+        upper_body_names = ['pelvis', 'waist_roll_link','torso_link']
+        # upper_body_names = [ 'torso_link']
+        self.upper_body_index = [self.body_names.index(name) for name in upper_body_names]
+
+        # Extract upper body state
+        upper_body_state = self.rigid_body_states_view[:, self.upper_body_index, :]
+        upper_quaternions = upper_body_state[:, :, 3:7]  # Extract quaternions
+        upper_body_rpy = get_euler_xyz_in_tensor(upper_quaternions.view(-1, 4))  # Shape: [num_envs * 3, 3]
+
+
+        # Convert to NumPy
+        return upper_body_rpy
+
+    def _init_upper_body(self):
+        """
+        Initialize upper body roll, pitch, and yaw.
+        """
+        upper_body_rpy = self._extract_upper_body_rpy()
+        self.upper_roll = upper_body_rpy[:,0]
+        self.upper_pitch = upper_body_rpy[:,1]
+        self.upper_yaw = upper_body_rpy[:,2]
+
+    def update_body_state(self):
+        """
+        Refresh the rigid body states and update the upper body roll, pitch, and yaw.
+        """
+        # Refresh the tensor to get the latest simulation state
+        self.gym.refresh_rigid_body_state_tensor(self.sim)
+
+        # Update upper body RPY
+        upper_body_rpy = self._extract_upper_body_rpy()
+        
+        self.upper_roll = upper_body_rpy[:,0]
+        self.upper_pitch = upper_body_rpy[:,1]
+        self.upper_yaw = upper_body_rpy[:,2]
+
+
+    def calculate_center_of_mass(self):
+        """
+        Calculate the Center of Mass (CoM) for each robot in all environments.
+
+        Returns:
+            torch.Tensor: The CoM position for each environment (shape: [num_envs, 3]).
+        """
+        num_envs = self.num_envs
+        num_bodies = self.num_bodies
+
+        # Get rigid body states (shape: [num_envs, num_bodies, 13])
+        rigid_body_states = self.rigid_body_states  # [num_envs, num_bodies, 13]
+        rigid_body_states = rigid_body_states.view(self.num_envs,num_bodies, 13)
+
+        # Extract body positions (only first 3 elements are [x, y, z] positions)
+        body_positions = rigid_body_states[:, :, :3]  # Shape: [num_envs, num_bodies, 3]
+
+        # Retrieve mass of each body
+        body_masses = []
+        for env_id in range(num_envs):
+            actor_handle = self.actor_handles[env_id]
+            body_props = self.gym.get_actor_rigid_body_properties(self.envs[env_id], actor_handle)
+            mass_list = [prop.mass for prop in body_props]  # Get mass of each rigid body
+            body_masses.append(mass_list)
+
+        # Convert mass list to tensor (Shape: [num_envs, num_bodies])
+        body_masses = torch.tensor(body_masses, device=self.device)
+
+        # Compute total mass for each environment (Shape: [num_envs, 1])
+        total_mass = torch.sum(body_masses, dim=1, keepdim=True)  # Shape: [num_envs, 1]
+
+        # Compute weighted sum of positions (Shape: [num_envs, 3])
+        com = torch.sum(body_positions * body_masses.unsqueeze(-1), dim=1) / total_mass
+
+        return com  # Shape: [num_envs, 3]
         
     def _post_physics_step_callback(self):
         self.update_feet_state()
+        self.update_body_state()
+        self.com = self.calculate_center_of_mass()
+
 
         period = 0.8
         offset = 0.5
@@ -161,6 +258,9 @@ class G1Robot(LeggedRobot):
         # print('self.privileged_obs_buf',self.privileged_obs_buf.shape)
 
 
+
+
+
         # add noise if needed
         if self.add_noise:
             self.obs_buf += (2 * torch.rand_like(self.obs_buf) - 1) * self.noise_scale_vec
@@ -182,8 +282,34 @@ class G1Robot(LeggedRobot):
             # print('terrain_obs_buf:',terrain_obs_buf.shape)
 
 
-    
+    def check_termination(self):
+        """ Check if environments need to be reset
+        """
+        self.reset_buf = torch.any(torch.norm(self.contact_forces[:, self.termination_contact_indices, :], dim=-1) > 1., dim=1)
+        self.reset_buf |= torch.logical_or(torch.abs(self.rpy[:,1])>1.0, torch.abs(self.rpy[:,0])>0.8)
+        termination_contact_buf = torch.any(torch.norm(self.contact_forces[:, self.termination_contact_indices, :], dim=-1) > 1., dim=1)
 
+        r, p = self.base_orn_rp[:, 0], self.base_orn_rp[:, 1]
+        
+        z = self.root_states[:, 2]
+
+        r_threshold_buff = r.abs() > self.cfg.termination.r_threshold
+        p_threshold_buff = p.abs() > self.cfg.termination.p_threshold
+        z_threshold_buff = z < self.cfg.termination.z_threshold
+        self.reset_buf |= r_threshold_buff
+        self.reset_buf |= p_threshold_buff
+        self.reset_buf |= z_threshold_buff
+
+        self.time_out_buf = self.episode_length_buf > self.max_episode_length # no terminal reward for time-outs
+        self.reset_buf |= self.time_out_buf
+
+
+    def get_body_orientation(self, return_yaw=False):
+        r, p, y = euler_from_quat(self.base_quat)
+        if return_yaw:
+            return torch.stack([r, p, y], dim=-1)
+        else:
+            return torch.stack([r, p], dim=-1)
 
     def _reward_contact(self):
         res = torch.zeros(self.num_envs, dtype=torch.float, device=self.device)
@@ -213,11 +339,145 @@ class G1Robot(LeggedRobot):
         return torch.sum(torch.square(self.dof_pos[:,[1,2,7,8]]), dim=1)
 
     def _reward_straight_knee(self):
-        # Indices for knee joints (e.g., 2nd and 3rd joints for each leg)
-        knee_indices = [3, 9]  # Assuming these are the knee joint indices
-        # Penalize deviation from the desired straight knee position
-        straight_knee_error = torch.square(self.dof_pos[:, knee_indices])
+        # Indices for knee joints (left and right knees)
+        knee_indices = [4, 10]  # Indices for left_knee_link and right_knee_link
+        # Penalize deviation from straight knee position, only when the foot is in contact
+        # self.contact_filt should correspond to the contact state of the feet (same order as knee indices)
+        straight_knee_error = torch.square(self.dof_pos[:, knee_indices]) * self.contact_filt[:, :len(knee_indices)]
+        # Return negative reward for deviation (penalty)
         return -torch.sum(straight_knee_error, dim=1)
+
+    def _reward_upper_body(self):
+        # Indices for knee joints (left and right knees)
+        upper_indices = [12, 13]  # Indices for left_knee_link and right_knee_link
+        # Penalize deviation from straight knee position, only when the foot is in contact
+        # self.contact_filt should correspond to the contact state of the feet (same order as knee indices)
+        
+        upper_error = torch.square(self.dof_pos[:, upper_indices]) 
+        # Return negative reward for deviation (penalty)
+        return -torch.sum(upper_error, dim=1)
+
+    def _reward_feet_drag(self):
+        # Determine the size of rigid body states
+        num_envs = self.num_envs
+        num_bodies = self.num_bodies
+        state_size = self.rigid_body_states.shape[1]
+
+        # Reshape rigid_body_states to [num_envs, num_bodies, state_size]
+        rigid_body_states = self.rigid_body_states.view(num_envs, num_bodies, state_size)
+
+        # Compute the feet velocity
+        feet_xyz_vel = torch.abs(rigid_body_states[:, self.feet_indices, 7:10]).sum(dim=-1)
+
+        # Filter velocities based on contact state
+        dragging_vel = self.contact_filt * feet_xyz_vel
+
+        # Compute the total reward/penalty for dragging
+        rew = dragging_vel.sum(dim=-1)
+
+        return rew
+
+
+    
+
+
+    def _reward_upper_body_roll(self,roll_weight=1.0):
+        """
+        Compute a reward for stability based on roll, pitch, and yaw deviations.
+
+        Args:
+            roll (float): Roll angle (radians).
+            pitch (float): Pitch angle (radians).
+            yaw (float): Yaw angle (radians).
+            roll_weight (float): Weighting factor for roll stability.
+            pitch_weight (float): Weighting factor for pitch stability.
+            yaw_weight (float): Weighting factor for yaw stability.
+
+        Returns:
+            float: Stability reward (higher is better).
+        """
+        num_envs = self.num_envs
+        num_body_parts = len(self.upper_body_index)  # Assume upper_body_index has the correct indices for upper body parts.
+
+        # Compute stability penalty (squared deviation)
+
+
+        upper_roll_error = torch.square(self.upper_roll)
+        
+        # Reshape to [num_envs, num_body_parts]
+        upper_roll_error = upper_roll_error.view(num_envs, num_body_parts)
+
+        # Debug: Check the reshaped tensor
+
+        # Sum across body parts (dim=1) to get the penalty for each environment
+        upper_roll_error = torch.sum(upper_roll_error, dim=1)
+
+        # Return negative stability penalty as the reward
+        return -upper_roll_error
+
+    def _reward_upper_body_pitch(self,roll_weight=1.0):
+        """
+        Compute a reward for stability based on roll, pitch, and yaw deviations.
+
+        Args:
+            roll (float): Roll angle (radians).
+            pitch (float): Pitch angle (radians).
+            yaw (float): Yaw angle (radians).
+            roll_weight (float): Weighting factor for roll stability.
+            pitch_weight (float): Weighting factor for pitch stability.
+            yaw_weight (float): Weighting factor for yaw stability.
+
+        Returns:
+            float: Stability reward (higher is better).
+        """
+        num_envs = self.num_envs
+        num_body_parts = len(self.upper_body_index)  # Assume upper_body_index has the correct indices for upper body parts.
+
+        # Compute stability penalty (squared deviation)
+
+
+        upper_pitch_error = torch.square(self.upper_roll)
+        
+        # Reshape to [num_envs, num_body_parts]
+        upper_pitch_error = upper_pitch_error.view(num_envs, num_body_parts)
+
+        # Debug: Check the reshaped tensor
+
+        # Sum across body parts (dim=1) to get the penalty for each environment
+        upper_pitch_error = torch.sum(upper_pitch_error, dim=1)
+
+        # Return negative stability penalty as the reward
+        return -upper_pitch_error
+    
+    def _reward_rpy(self):
+        
+        return -torch.sum(torch.abs(self.rpy[:,0:2]),dim=-1)
+
+
+
+    def _reward_center_of_mass_stability(self, weight=1.0):
+        """
+        Calculate a reward for maintaining CoM stability in the X and Y directions.
+
+        Args:
+            weight (float): Weighting factor for the penalty.
+
+        Returns:
+            torch.Tensor: The reward value.
+        """
+        # Compute current Center of Mass
+        self.com = self.calculate_center_of_mass()  # Shape: [num_envs, 3]
+
+        # Desired CoM in X and Y (keep Z free)
+        desired_com = torch.zeros_like(self.com)  # Default target at [0, 0, free]
+        desired_com[:, 2] = self.com[:, 2]  # Keep Z unchanged
+
+        # Compute squared distance in X and Y only
+        stability_penalty = torch.sum((self.com[:, :2] - desired_com[:, :2]) ** 2, dim=1)
+
+        # Reward is the negative penalty, scaled by weight
+        return -weight * stability_penalty  # Higher reward for lower deviation
+
     
 
 

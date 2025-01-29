@@ -18,17 +18,38 @@ class G1RoughCfg( LeggedRobotCfg ):
            'right_knee_joint' : 0.0,                                             
            'right_ankle_pitch_joint': -0.2,                              
            'right_ankle_roll_joint' : 0,       
-           'torso_joint' : 0.
+           'waist_yaw_joint' : 0.,
+           'waist_roll_joint' : 0.,
+           'waist_pitch_joint' : 0.
         }
     
     class env(LeggedRobotCfg.env):
-        num_observations = 47 
+        num_fixed_joint = 0
+        num_observations = 47 + 6 - 3 *num_fixed_joint
         # num_observations = 47 + 26 + 187
         # num_observations = 77
-        num_privileged_obs = 50 + 26
+        num_privileged_obs = 50 + 26 + 6 -3*num_fixed_joint
         # num_privileged_obs = 50
 
-        num_actions = 12
+        num_actions = 14- num_fixed_joint
+
+    class commands(LeggedRobotCfg.commands):
+        curriculum = False
+        max_curriculum = 1.
+        num_commands = 4 # default: lin_vel_x, lin_vel_y, ang_vel_yaw, heading (in heading mode ang_vel_yaw is recomputed from heading error)
+        resampling_time = 10. # time before command are changed[s]
+        heading_command = False # if true: compute ang vel command from heading error
+        class ranges:
+            lin_vel_x = [-2.0, 2.0] # min max [m/s]
+            lin_vel_y = [-1.0, 1.0]   # min max [m/s]
+            ang_vel_yaw = [-1, 1]    # min max [rad/s]
+            heading = [-3.14, 3.14]
+        class ranges:
+            lin_vel_x = [0.0, 0] # min max [m/s]
+            lin_vel_y = [0.0, 0]   # min max [m/s]
+            ang_vel_yaw = [0, 0]    # min max [rad/s]
+            heading = [0, 0]
+
 
 
     class domain_rand(LeggedRobotCfg.domain_rand):
@@ -48,14 +69,25 @@ class G1RoughCfg( LeggedRobotCfg ):
         stiffness = {'hip_yaw': 100,
                      'hip_roll': 100,
                      'hip_pitch': 100,
+                    #  'waist_yaw': 100,
+                     'waist_roll': 90,
+                     'waist_pitch': 80,
                      'knee': 150,
                      'ankle': 40,
+                    #  'ankle_pitch': 35,
+                    #  'ankle_roll': 30,
                      }  # [N*m/rad]
         damping = {  'hip_yaw': 2,
                      'hip_roll': 2,
                      'hip_pitch': 2,
+                    #  'waist_yaw': 2,
+                     'waist_roll': 0.8,
+                     'waist_pitch': 2,
                      'knee': 4,
                      'ankle': 2,
+
+                    #  'ankle_pitch': 4,
+                    #  'ankle_roll': 2,
                      }  # [N*m/rad]  # [N*m*s/rad]
         # action scale: target angle = actionScale * action + defaultAngle
         action_scale = 0.25
@@ -63,7 +95,9 @@ class G1RoughCfg( LeggedRobotCfg ):
         decimation = 4
 
     class asset( LeggedRobotCfg.asset ):
-        file = '{LEGGED_GYM_ROOT_DIR}/resources/robots/g1_description/g1_12dof.urdf'
+        # file = '{LEGGED_GYM_ROOT_DIR}/resources/robots/g1_description/g1_15dof_rev_1_0 .urdf'
+        file = '{LEGGED_GYM_ROOT_DIR}/resources/robots/g1_description/g1_15dof.urdf'
+        # file = '{LEGGED_GYM_ROOT_DIR}/resources/robots/g1_description/g1_15dof_fixed.urdf'
         name = "g1"
         foot_name = "ankle_roll"
         penalize_contacts_on = ["hip", "knee"]
@@ -93,7 +127,14 @@ class G1RoughCfg( LeggedRobotCfg ):
             contact_no_vel = -0.2
             feet_swing_height = -20.0
             contact = 0.18
-            straight_knee = 0.5
+            straight_knee = 5
+            # upper_body = 0
+            feet_drag = -0.1
+            upper_body_roll = 1
+            center_of_mass_stability = 1
+            # upper_body_pitch = 0.1
+            # rpy = 1
+
 
 class G1RoughCfgPPO( LeggedRobotCfgPPO ):
     class policy:
