@@ -20,7 +20,25 @@ class G1RoughCfg( LeggedRobotCfg ):
            'right_ankle_roll_joint' : 0,       
            'waist_yaw_joint' : 0.,
            'waist_roll_joint' : 0.,
-           'waist_pitch_joint' : 0.
+           'waist_pitch_joint' : 0.,
+           'left_shoulder_pitch_joint' : 0.,
+           'left_shoulder_roll_joint' : 0.,
+           'left_shoulder_yaw_joint' : 0.,
+           'left_elbow_joint' : 0.,
+           'left_wrist_roll_joint' : 0.,
+           'left_wrist_pitch_joint' : 0.,
+           'left_wrist_yaw_joint' : 0.,
+           'right_shoulder_pitch_joint' : 0.,
+           'right_shoulder_roll_joint' : 0.,
+           'right_shoulder_yaw_joint' : 0.,
+           'right_elbow_joint' : 0.,
+           'right_wrist_roll_joint' : 0.,
+           'right_wrist_pitch_joint' : 0.,
+           'right_wrist_yaw_joint' : 0.
+
+
+
+
         }
     
     class env(LeggedRobotCfg.env):
@@ -31,7 +49,41 @@ class G1RoughCfg( LeggedRobotCfg ):
         num_privileged_obs = 50 + 26 + 6 -3*num_fixed_joint
         # num_privileged_obs = 50
 
-        num_actions = 14- num_fixed_joint
+        num_actions = 14- num_fixed_joint + 2*14
+
+
+
+        # ----Motion_tracking----
+        randomize_start_pos = False
+        randomize_start_vel = False
+        randomize_start_yaw = False
+        rand_yaw_range = 1.2
+        randomize_start_y = False
+        rand_y_range = 0.5
+        randomize_start_pitch = False
+        rand_pitch_range = 1.6
+
+        contact_buf_len = 100
+
+        next_goal_threshold = 0.2
+        reach_goal_delay = 0.1
+        num_future_goal_obs = 2
+        record_video = False
+        record_frame = False
+        
+
+        history_encoding = True
+        reorder_dofs = True
+
+
+        history_len = 10
+        n_proprio = 47 + 6 - 3 *num_fixed_joint
+        n_demo_steps = 2
+        n_demo = 9 + 3 + 3 + 3 +6*3  #observe height
+        interval_demo_steps = 0.1
+
+
+
 
     class commands(LeggedRobotCfg.commands):
         curriculum = False
@@ -60,6 +112,29 @@ class G1RoughCfg( LeggedRobotCfg ):
         push_robots = True
         push_interval_s = 5
         max_push_vel_xy = 1.5
+        gravity_rand_interval_s = 10
+        randomize_gravity = True
+        gravity_range = [-0.1, 0.1]
+
+
+
+        randomize_base_com = True
+        added_com_range = [-0.07, 0.07]
+        motor_strength_range = [0.8, 1.2]
+        randomize_motor = True
+
+
+        delay_update_global_steps = 24 * 8000
+        action_delay = False
+        action_curr_step = [1, 1]
+        action_curr_step_scratch = [0, 1]
+        action_delay_view = 1
+        action_buf_len = 8
+
+
+
+
+
       
 
     class control( LeggedRobotCfg.control ):
@@ -69,11 +144,19 @@ class G1RoughCfg( LeggedRobotCfg ):
         stiffness = {'hip_yaw': 100,
                      'hip_roll': 100,
                      'hip_pitch': 100,
+       
                     #  'waist_yaw': 100,
                      'waist_roll': 90,
                      'waist_pitch': 80,
                      'knee': 150,
                      'ankle': 40,
+                     'shoulder_yaw': 100,
+                     'shoulder_roll': 100,
+                     'shoulder_pitch': 100,
+                     'elbow' : 100,
+                     'wrist_yaw': 100,
+                     'wrist_roll': 100,
+                     'wrist_pitch': 100
                     #  'ankle_pitch': 35,
                     #  'ankle_roll': 30,
                      }  # [N*m/rad]
@@ -85,6 +168,13 @@ class G1RoughCfg( LeggedRobotCfg ):
                      'waist_pitch': 2,
                      'knee': 4,
                      'ankle': 2,
+                     'shoulder_yaw': 2,
+                     'shoulder_roll': 2,
+                     'shoulder_pitch': 2,
+                     'elbow' : 2,
+                     'wrist_yaw': 2,
+                     'wrist_roll': 2,
+                     'wrist_pitch': 2
 
                     #  'ankle_pitch': 4,
                     #  'ankle_roll': 2,
@@ -96,10 +186,11 @@ class G1RoughCfg( LeggedRobotCfg ):
 
     class asset( LeggedRobotCfg.asset ):
         # file = '{LEGGED_GYM_ROOT_DIR}/resources/robots/g1_description/g1_15dof_rev_1_0 .urdf'
-        file = '{LEGGED_GYM_ROOT_DIR}/resources/robots/g1_description/g1_15dof.urdf'
+        file = '{LEGGED_GYM_ROOT_DIR}/resources/robots/g1_description/g1_28dof.urdf'
         # file = '{LEGGED_GYM_ROOT_DIR}/resources/robots/g1_description/g1_15dof_fixed.urdf'
         name = "g1"
         foot_name = "ankle_roll"
+        torso_name = "torso_link"
         penalize_contacts_on = ["hip", "knee"]
         terminate_after_contacts_on = ["pelvis"]
         self_collisions = 0 # 1 to disable, 0 to enable...bitwise filter
@@ -134,6 +225,23 @@ class G1RoughCfg( LeggedRobotCfg ):
             center_of_mass_stability = 1
             # upper_body_pitch = 0.1
             # rpy = 1
+
+
+    class motion:
+        motion_curriculum = True
+        motion_type = "yaml"
+        motion_name = "motions_autogen_all_no_run_jump.yaml"
+
+        global_keybody = False
+        global_keybody_reset_time = 2
+
+        num_envs_as_motions = False
+
+        no_keybody = False
+        regen_pkl = False
+
+        step_inplace_prob = 0.05
+        resample_step_inplace_interval_s = 10
 
 
 class G1RoughCfgPPO( LeggedRobotCfgPPO ):

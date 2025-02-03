@@ -5,8 +5,20 @@ from isaacgym.torch_utils import *
 from isaacgym import gymtorch, gymapi, gymutil
 from legged_gym.utils.math import quat_apply_yaw, wrap_to_pi, torch_rand_sqrt_float, euler_from_quat
 from legged_gym.utils.isaacgym_utils import get_euler_xyz as get_euler_xyz_in_tensor
+import os
 
+
+from legged_gym import LEGGED_GYM_ROOT_DIR, ASE_DIR
+
+
+import sys
+sys.path.append(os.path.join(ASE_DIR, "ase"))
+sys.path.append(os.path.join(ASE_DIR, "ase/utils"))
 import torch
+# from motion_lib import MotionLib
+from ASE.ase.utils.motion_lib import MotionLib
+
+
 
 class G1Robot(LeggedRobot):
     
@@ -146,6 +158,23 @@ class G1Robot(LeggedRobot):
         com = torch.sum(body_positions * body_masses.unsqueeze(-1), dim=1) / total_mass
 
         return com  # Shape: [num_envs, 3]
+
+    def post_physics_step(self):
+        # self._motion_sync()
+        super().post_physics_step()
+
+        # step motion lib
+        self._motion_times += self._motion_dt
+        self._motion_times[self._motion_times >= self._motion_lengths] = 0.
+        self.update_demo_obs()
+        # self.update_mimic_obs()
+        
+        if self.viewer and self.enable_viewer_sync and self.debug_viz:
+            self.gym.clear_lines(self.viewer)
+            self.draw_rigid_bodies_demo()
+            self.draw_rigid_bodies_actual()
+
+        return
         
     def _post_physics_step_callback(self):
         self.update_feet_state()
@@ -160,9 +189,71 @@ class G1Robot(LeggedRobot):
         self.phase_right = (self.phase + offset) % 1
         self.leg_phase = torch.cat([self.phase_left.unsqueeze(1), self.phase_right.unsqueeze(1)], dim=-1)
         
+
+        # ---Add Motion Tracking---
+        if self.common_step_counter % int(self.cfg.domain_rand.gravity_rand_interval) == 0:
+            self._randomize_gravity()
+        if self.common_step_counter % self.cfg.motion.resample_step_inplace_interval == 0:
+            self.resample_step_inplace_ids()
+
         return super()._post_physics_step_callback()
     
-    
+    def resample_step_inplace_ids(self, ):
+        self.step_inplace_ids = torch.rand(self.num_envs, device=self.device) < self.cfg.motion.step_inplace_prob
+
+
+    def _randomize_gravity(self, external_force = None):
+        if self.cfg.domain_rand.randomize_gravity and external_force is None:
+            min_gravity, max_gravity = self.cfg.domain_rand.gravity_range
+            external_force = torch.rand(3, dtype=torch.float, device=self.device,
+                                        requires_grad=False) * (max_gravity - min_gravity) + min_gravity
+
+
+        sim_params = self.gym.get_sim_params(self.sim)
+        gravity = external_force + torch.Tensor([0, 0, -9.81]).to(self.device)
+        self.gravity_vec[:, :] = gravity.unsqueeze(0) / torch.norm(gravity)
+        sim_params.gravity = gymapi.Vec3(gravity[0], gravity[1], gravity[2])
+        self.gym.set_sim_params(self.sim, sim_params)
+
+    def _parse_cfg(self, cfg):
+        super()._parse_cfg(cfg)
+        self.cfg.domain_rand.gravity_rand_interval = np.ceil(self.cfg.domain_rand.gravity_rand_interval_s / self.dt)
+        self.cfg.motion.resample_step_inplace_interval = np.ceil(self.cfg.motion.resample_step_inplace_interval_s / self.dt)
+
+
+    def _update_goals(self):
+        """
+        Updates the humanoid robot's target position and orientation to follow a moving goal.
+        The target is reset periodically and updated based on demonstration velocity  Only for nly sets a target position (x, y) and target yaw.
+        """
+
+        # Determine if the target position should be reset based on episode progress
+        # This resets every `global_keybody_reset_time` seconds
+        reset_target_pos = self.episode_length_buf % (self.cfg.motion.global_keybody_reset_time // self.dt) == 0
+
+        # If the condition is met, reset target position to current robot position (absolute)
+        self.target_pos_abs[reset_target_pos] = self.root_states[reset_target_pos, :2]
+
+        # Update the target position by integrating the demonstration velocity
+        # This ensures the target moves smoothly over time
+        self.target_pos_abs += (self._curr_demo_root_vel * self.dt)[:, :2]
+
+        # Compute the target position in the robot's local coordinate frame
+        # Converts global coordinates (world frame) into a relative position (robot frame)
+        self.target_pos_rel = global_to_local_xy(self.yaw[:, None], self.target_pos_abs - self.root_states[:, :2])
+
+        # Convert the demonstration's quaternion orientation to Euler angles (roll, pitch, yaw)
+        r, p, y = euler_from_quaternion(self._curr_demo_quat)
+
+        # Set the target yaw (rotation around the Z-axis) based on the demonstration
+        self.target_yaw = y.clone()
+
+        # Compute desired velocity magnitude from the demonstration (if enabled)
+        # This helps determine how fast the humanoid should move
+
+
+
+
     def compute_observations(self):
         """ Computes observations
         """
@@ -478,6 +569,15 @@ class G1Robot(LeggedRobot):
         # Reward is the negative penalty, scaled by weight
         return -weight * stability_penalty  # Higher reward for lower deviation
 
+    def _reward_feet_edge(self):
+        feet_pos_xy = ((self.rigid_body_states[:, self.feet_indices, :2] + self.terrain.cfg.border_size) / self.cfg.terrain.horizontal_scale).round().long()  # (num_envs, 4, 2)
+        feet_pos_xy[..., 0] = torch.clip(feet_pos_xy[..., 0], 0, self.x_edge_mask.shape[0]-1)
+        feet_pos_xy[..., 1] = torch.clip(feet_pos_xy[..., 1], 0, self.x_edge_mask.shape[1]-1)
+        feet_at_edge = self.x_edge_mask[feet_pos_xy[..., 0], feet_pos_xy[..., 1]]
+    
+        self.feet_at_edge = self.contact_filt & feet_at_edge
+        rew = (self.terrain_levels > 3) * torch.sum(self.feet_at_edge, dim=-1)
+        return rew
     
 
 
@@ -507,8 +607,8 @@ class G1Robot(LeggedRobot):
         self._valid_dof_body_ids = torch.ones(len(self._dof_body_ids)+2*4, device=self.device, dtype=torch.bool)
         self._valid_dof_body_ids[-1] = 0
         self._valid_dof_body_ids[-6] = 0
-        self.dof_indices_sim = torch.tensor([0, 1, 2, 5, 6, 7, 11, 12, 13, 16, 17, 18], device=self.device, dtype=torch.long)
-        self.dof_indices_motion = torch.tensor([2, 0, 1, 7, 5, 6, 12, 11, 13, 17, 16, 18], device=self.device, dtype=torch.long)
+        self.dof_indices_sim = torch.tensor([0, 1, 2, 5, 6, 7, 11, 12, 13, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27], device=self.device, dtype=torch.long)
+        self.dof_indices_motion = torch.tensor([2, 0, 1, 7, 5, 6, 12, 11, 13, 17, 16, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27], device=self.device, dtype=torch.long)
         
         # self._dof_ids_subset = torch.tensor([0, 1, 2, 5, 6, 7, 10, 11, 12, 13, 14, 15, 16, 17, 18], device=self.device)  # no knee and ankle
         self._dof_ids_subset = torch.tensor([10, 11, 12, 13, 14, 15, 16, 17, 18], device=self.device)  # no knee and ankle
@@ -523,11 +623,34 @@ class G1Robot(LeggedRobot):
         #'right_shoulder_pitch_joint', 'right_shoulder_roll_joint', 'right_shoulder_yaw_joint', 'right_elbow_joint']
         # self.dof_ids_subset = torch.tensor([0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18], device=self.device, dtype=torch.long)
         # motion_name = "17_04_stealth"
-        if cfg.motion.motion_type == "single":
-            motion_file = os.path.join(ASE_DIR, f"ase/poselib/data/retarget_npy/{cfg.motion.motion_name}.npy")
-        else:
-            assert cfg.motion.motion_type == "yaml"
-            motion_file = os.path.join(ASE_DIR, f"ase/poselib/data/configs/{cfg.motion.motion_name}")
+
+
+
+                # Define base directory for motion reference data
+        MOTION_BASE_DIR = "/home/tianhu/unitree_rl_gym/reference_data"
+
+        # Specify motion file name from configuration
+        cfg.motion.motion_name = "02_01.npy"
+
+        # Construct the full motion file path
+        motion_file = os.path.join(MOTION_BASE_DIR, cfg.motion.motion_name)
+
+        # Ensure the motion file exists before proceeding
+        if not os.path.exists(motion_file):
+            raise FileNotFoundError(f"Motion file not found: {motion_file}")
+
+        print(f"Loading motion file: {motion_file}")
+
+
+
+
+        # motion_file = os.path.join(ASE_DIR, f"ase/poselib/data/retarget_npy/{cfg.motion.motion_name}.npy")
+        # if cfg.motion.motion_type == "single":
+        #     motion_file = os.path.join(ASE_DIR, f"ase/poselib/data/retarget_npy/{cfg.motion.motion_name}.npy")
+        # else:
+        #     assert cfg.motion.motion_type == "yaml"
+        #     motion_file = os.path.join(ASE_DIR, f"ase/poselib/data/configs/{cfg.motion.motion_name}")
+
         
         self._load_motion(motion_file, cfg.motion.no_keybody)
 
@@ -583,3 +706,463 @@ class G1Robot(LeggedRobot):
         self._motion_times[env_ids] = self.resample_motion_times(env_ids)
         self._motion_lengths[env_ids] = self._motion_lib.get_motion_length(self._motion_ids[env_ids])
         self._motion_difficulty[env_ids] = self._motion_lib.get_motion_difficulty(self._motion_ids[env_ids])
+
+    def resample_motion_times(self, env_ids):
+        return self._motion_lib.sample_time(self._motion_ids[env_ids])
+
+    def reset_idx(self, env_ids, init=False):
+        """ Reset some environments.
+        Includes motion curriculum learning, terrain adaptation, velocity integral reset, 
+        physics simulation updates, and buffer clearing.
+
+        Args:
+        env_ids (list[int]): List of environment ids to reset.
+        init (bool, optional): Whether this is the first reset. Defaults to False.
+        """
+        if len(env_ids) == 0:
+            return
+
+        # --- MOTION CURRICULUM LEARNING ---
+        if self.cfg.motion.motion_curriculum:
+            completion_rate = self.episode_length_buf[env_ids] * self.dt / self._motion_lengths[env_ids]
+            completion_rate_mean = completion_rate.mean()
+
+            # Adjust curriculum difficulty based on completion rates
+            relax_ids = completion_rate < 0.3
+            strict_ids = completion_rate > 0.9
+
+            self.dof_term_threshold[env_ids[relax_ids]] += 0.05
+            self.dof_term_threshold[env_ids[strict_ids]] -= 0.05
+            self.dof_term_threshold.clamp_(1.5, 3)
+
+            self.height_term_threshold[env_ids[relax_ids]] += 0.01
+            self.height_term_threshold[env_ids[strict_ids]] -= 0.01
+            self.height_term_threshold.clamp_(0.03, 0.1)
+
+            self.keybody_term_threshold[env_ids[completion_rate < 0.6]] -= 0.05
+            self.keybody_term_threshold[env_ids[completion_rate > 0.9]] += 0.05
+            self.keybody_term_threshold.clamp_(0.1, 0.4)
+
+            self.yaw_term_threshold[env_ids[completion_rate < 0.4]] -= 0.05
+            self.yaw_term_threshold[env_ids[completion_rate > 0.8]] += 0.05
+            self.yaw_term_threshold.clamp_(0.1, 0.6)
+
+        # --- UPDATE MOTION STATES (if using motion imitation) ---
+        self.update_motion_ids(env_ids)
+        motion_ids = self._motion_ids[env_ids]
+        motion_times = self._motion_times[env_ids]
+        root_pos, root_rot, dof_pos_motion, root_vel, root_ang_vel, dof_vel, key_pos = \
+            self._motion_lib.get_motion_state(motion_ids, motion_times)
+        print('dof_pos_motion.shape:',dof_pos_motion.shape)
+        # Adjust DOF states based on motion reference
+        dof_pos_motion, dof_vel = self.reindex_dof_pos_vel(dof_pos_motion, dof_vel)
+
+        # --- RESET ROBOT STATES ---
+        self._reset_dofs(env_ids, dof_pos_motion, dof_vel)
+        self._reset_root_states(env_ids, root_vel, root_rot, root_pos[:, 2])
+
+        # --- UPDATE CURRICULUM (if enabled) ---
+        if self.cfg.terrain.curriculum:
+            self._update_terrain_curriculum(env_ids)
+
+        # --- INITIALIZE OR UPDATE ROOT POSITION ---
+        if init:
+            self.init_root_pos_global = self.root_states[:, :3].clone()
+            self.init_root_pos_global_demo = root_pos[:].clone()
+            self.target_pos_abs = self.init_root_pos_global.clone()[:, :2]
+        else:
+            self.init_root_pos_global[env_ids] = self.root_states[env_ids, :3].clone()
+            self.init_root_pos_global_demo[env_ids] = root_pos[:].clone()
+            self.target_pos_abs[env_ids] = self.init_root_pos_global[env_ids].clone()[:, :2]
+
+        # --- RESAMPLE COMMANDS ---
+        self._resample_commands(env_ids)
+
+        # --- SIMULATE ONE STEP TO UPDATE PHYSICS STATE ---
+        self.gym.simulate(self.sim)
+        self.gym.fetch_results(self.sim, True)
+        self.gym.refresh_rigid_body_state_tensor(self.sim)
+
+        # --- RESET BUFFERS ---
+        self.actions[env_ids] = 0.
+        self.last_actions[env_ids] = 0.
+        self.last_dof_vel[env_ids] = 0.
+        self.last_torques[env_ids] = 0.
+        self.last_root_vel[:] = 0.
+        self.feet_air_time[env_ids] = 0.
+        self.reset_buf[env_ids] = 1
+
+        self.obs_history_buf[env_ids, :, :] = 0.
+        self.contact_buf[env_ids, :, :] = 0.
+        self.action_history_buf[env_ids, :, :] = 0.
+
+        self.cur_goal_idx[env_ids] = 0
+        self.reach_goal_timer[env_ids] = 0
+
+        # --- RESET VELOCITY INTEGRALS (if tracking velocity) ---
+        self.episode_v_integral[env_ids].zero_()
+        self.episode_w_integral[env_ids].zero_()
+
+        # --- LOG EPISODE METRICS ---
+        self.extras["episode"] = {}
+        self.extras["episode"]["curriculum_completion"] = completion_rate_mean
+
+        for key in self.episode_sums.keys():
+            self.extras["episode"]['rew_' + key] = torch.mean(self.episode_sums[key][env_ids]) / self.max_episode_length_s
+            self.episode_sums[key][env_ids] = 0.
+
+        self.episode_length_buf[env_ids] = 0
+
+        self.extras["episode"]["curriculum_motion_difficulty_level"] = self._max_motion_difficulty
+        self.extras["episode"]["curriculum_dof_term_thresh"] = self.dof_term_threshold.mean()
+        self.extras["episode"]["curriculum_keybody_term_thresh"] = self.keybody_term_threshold.mean()
+        self.extras["episode"]["curriculum_yaw_term_thresh"] = self.yaw_term_threshold.mean()
+        self.extras["episode"]["curriculum_height_term_thresh"] = self.height_term_threshold.mean()
+
+        if self.cfg.terrain.curriculum:
+            self.extras["episode"]["terrain_level"] = torch.mean(self.terrain_levels.float())
+        if self.cfg.commands.curriculum:
+            self.extras["episode"]["max_command_x"] = self.command_ranges["lin_vel_x"][1]
+
+        if self.cfg.env.send_timeouts:
+            self.extras["time_outs"] = self.time_out_buf
+
+    def _reset_dofs(self, env_ids, dof_pos, dof_vel):
+            
+        # dof_pos_default = self.default_dof_pos + torch_rand_float(-0.2, 0.2, (len(env_ids), self.num_dof), device=self.device) * self.default_dof_pos
+        print('dof_pos.shape:',dof_pos.shape)
+        print(' self.dof_pos.shape:', self.dof_pos.shape)
+        self.dof_pos[env_ids] = dof_pos
+        self.dof_vel[env_ids] = dof_vel
+
+            # self.dof_pos[env_ids] = self.default_dof_pos + torch_rand_float(0., 0.5, (len(env_ids), self.num_dof), device=self.device)
+            # self.dof_vel[env_ids] = 0.
+
+        env_ids_int32 = env_ids.to(dtype=torch.int32)
+        self.gym.set_dof_state_tensor_indexed(self.sim,
+                                            gymtorch.unwrap_tensor(self.dof_state),
+                                            gymtorch.unwrap_tensor(env_ids_int32), len(env_ids_int32))
+
+
+
+        
+
+
+    def _update_goals(self):
+        """
+        Updates the humanoid robot's target position and orientation to follow a moving goal.
+        The target is reset periodically and updated based on demonstration velocity  Only for nly sets a target position (x, y) and target yaw.
+        """
+
+        # Determine if the target position should be reset based on episode progress
+        # This resets every `global_keybody_reset_time` seconds
+        reset_target_pos = self.episode_length_buf % (self.cfg.motion.global_keybody_reset_time // self.dt) == 0
+
+        # If the condition is met, reset target position to current robot position (absolute)
+        self.target_pos_abs[reset_target_pos] = self.root_states[reset_target_pos, :2]
+
+        # Update the target position by integrating the demonstration velocity
+        # This ensures the target moves smoothly over time
+        self.target_pos_abs += (self._curr_demo_root_vel * self.dt)[:, :2]
+
+        # Compute the target position in the robot's local coordinate frame
+        # Converts global coordinates (world frame) into a relative position (robot frame)
+        self.target_pos_rel = global_to_local_xy(self.yaw[:, None], self.target_pos_abs - self.root_states[:, :2])
+
+        # Convert the demonstration's quaternion orientation to Euler angles (roll, pitch, yaw)
+        r, p, y = euler_from_quaternion(self._curr_demo_quat)
+
+        # Set the target yaw (rotation around the Z-axis) based on the demonstration
+        self.target_yaw = y.clone()
+
+        # Compute desired velocity magnitude from the demonstration (if enabled)
+        # This helps determine how fast the humanoid should move
+
+
+    def update_demo_obs(self):
+        # Compute Motion Time for Demo Retrieval
+        demo_motion_times = self._motion_demo_offsets + self._motion_times[:, None]  # [num_envs, demo_dim]
+        # Retrieve Motion Data from Motion Library
+        root_pos, root_rot, dof_pos, root_vel, root_ang_vel, dof_vel, key_pos, local_key_body_pos \
+            = self._motion_lib.get_motion_state(self._motion_ids.repeat_interleave(self._motion_num_future_steps), demo_motion_times.flatten(), get_lbp=True)
+        # Adjust Joint Position and Velocity Order
+        dof_pos, dof_vel = self.reindex_dof_pos_vel(dof_pos, dof_vel)
+        
+        # Store the Retrieved Motion Data
+        self._curr_demo_root_pos[:] = root_pos.view(self.num_envs, self._motion_num_future_steps, 3)[:, 0, :]
+        self._curr_demo_quat[:] = root_rot.view(self.num_envs, self._motion_num_future_steps, 4)[:, 0, :]
+        self._curr_demo_root_vel[:] = root_vel.view(self.num_envs, self._motion_num_future_steps, 3)[:, 0, :]
+        self._curr_demo_keybody[:] = local_key_body_pos[:, self._key_body_ids_sim_subset].view(self.num_envs, self._motion_num_future_steps, self._num_key_bodies, 3)[:, 0, :, :]
+        self._in_place_flag = 0*(torch.norm(self._curr_demo_root_vel, dim=-1) < 0.2)
+        # for i in range(13):
+        #     feet_pos_global = key_pos[:, i]# - root_pos + self.root_states[:, :3]
+        #     pose = gymapi.Transform(gymapi.Vec3(feet_pos_global[self.lookat_id, 0], feet_pos_global[self.lookat_id, 1], feet_pos_global[self.lookat_id, 2]), r=None)
+        #     gymutil.draw_lines(edge_geom, self.gym, self.viewer, self.envs[self.lookat_id], pose)
+        demo_obs = build_demo_observations(root_pos, root_rot, root_vel, root_ang_vel, dof_pos[:, self._dof_ids_subset], dof_vel, key_pos, local_key_body_pos[:, self._key_body_ids_sim_subset, :], self._dof_offsets)
+        self._demo_obs_buf[:] = demo_obs.view(self.num_envs, self.cfg.env.n_demo_steps, self.cfg.env.n_demo)[:]
+
+    def compute_obs_buf(self):
+        imu_obs = torch.stack((self.roll, self.pitch), dim=1)
+        return torch.cat((#motion_id_one_hot,
+                            self.base_ang_vel  * self.obs_scales.ang_vel,   #[1,3]
+                            imu_obs,    #[1,2]
+                            torch.sin(self.yaw - self.target_yaw)[:, None],  #[1,1]
+                            torch.cos(self.yaw - self.target_yaw)[:, None],  #[1,1]
+                            # self.target_pos_rel,  
+                            self.reindex((self.dof_pos - self.default_dof_pos_all) * self.obs_scales.dof_pos),
+                            self.reindex(self.dof_vel * self.obs_scales.dof_vel),
+                            self.reindex(self.action_history_buf[:, -1]),
+                            self.reindex_feet(self.contact_filt.float()*0-0.5),
+                            ),dim=-1)
+
+    def compute_obs_demo(self):
+        obs_demo = self._next_demo_obs_buf.clone()#self._demo_obs_buf.clone().flatten(start_dim=1)
+        obs_demo[self._in_place_flag, self._n_demo_dof:self._n_demo_dof+3] = 0
+        return obs_demo
+
+    def _motion_sync(self):
+        num_motions = self._motion_lib.num_motions()
+        motion_ids = self._motion_ids
+        # print(self._motion_times[self.lookat_id])
+        # motion_times = self.episode_length_buf * self._motion_dt
+
+        root_pos, root_rot, dof_pos, root_vel, root_ang_vel, dof_vel, key_pos \
+           = self._motion_lib.get_motion_state(motion_ids, self._motion_times)
+        
+        root_pos[:, :2] = (self._curr_demo_root_pos - self.init_root_pos_global_demo + self.init_root_pos_global)[:, :2]
+        root_vel = torch.zeros_like(root_vel)
+        root_ang_vel = torch.zeros_like(root_ang_vel)
+        dof_vel = torch.zeros_like(dof_vel)
+
+        env_ids = torch.arange(self.num_envs, dtype=torch.long, device=self.device)
+
+        dof_pos, dof_vel = self.reindex_dof_pos_vel(dof_pos, dof_vel)
+
+        self._set_env_state(env_ids=env_ids, 
+                            root_pos=root_pos, 
+                            root_rot=root_rot, 
+                            dof_pos=dof_pos, 
+                            root_vel=root_vel, 
+                            root_ang_vel=root_ang_vel, 
+                            dof_vel=dof_vel)
+
+        env_ids_int32 = env_ids.to(dtype=torch.int32)
+        self.gym.set_actor_root_state_tensor_indexed(self.sim,
+                                                     gymtorch.unwrap_tensor(self.root_states),
+                                                     gymtorch.unwrap_tensor(env_ids_int32), len(env_ids_int32))
+        self.gym.set_dof_state_tensor_indexed(self.sim,
+                                              gymtorch.unwrap_tensor(self.dof_state),
+                                              gymtorch.unwrap_tensor(env_ids_int32), len(env_ids_int32))
+        return
+
+    def _set_env_state(self, env_ids, root_pos, root_rot, dof_pos, root_vel, root_ang_vel, dof_vel):
+        self.root_states[env_ids, 0:3] = root_pos
+        self.root_states[env_ids, 3:7] = root_rot
+        self.root_states[env_ids, 7:10] = root_vel
+        self.root_states[env_ids, 10:13] = root_ang_vel
+
+        self.dof_pos[env_ids] = dof_pos
+        self.dof_vel[env_ids] = dof_vel
+        return
+
+    ######### utils #########
+    
+    def reindex_dof_pos_vel(self, dof_pos, dof_vel):
+        dof_pos = reindex_motion_dof(dof_pos, self.dof_indices_sim, self.dof_indices_motion, self._valid_dof_body_ids)
+        dof_vel = reindex_motion_dof(dof_vel, self.dof_indices_sim, self.dof_indices_motion, self._valid_dof_body_ids)
+        return dof_pos, dof_vel
+
+    def draw_rigid_bodies_demo(self, ):
+        geom = gymutil.WireframeSphereGeometry(0.06, 32, 32, None, color=(0, 1, 0))
+        local_body_pos = self._curr_demo_keybody.clone().view(self.num_envs, self._num_key_bodies, 3)
+        if self.cfg.motion.global_keybody:
+            curr_demo_xyz = torch.cat((self.target_pos_abs, self._curr_demo_root_pos[:, 2:3]), dim=-1)
+        else:
+            curr_demo_xyz = torch.cat((self.root_states[:, :2], self._curr_demo_root_pos[:, 2:3]), dim=-1)
+        global_body_pos = local_to_global(self._curr_demo_quat, local_body_pos, curr_demo_xyz)
+        for i in range(global_body_pos.shape[1]):
+            pose = gymapi.Transform(gymapi.Vec3(global_body_pos[self.lookat_id, i, 0], global_body_pos[self.lookat_id, i, 1], global_body_pos[self.lookat_id, i, 2]), r=None)
+            gymutil.draw_lines(geom, self.gym, self.viewer, self.envs[self.lookat_id], pose)
+
+    def draw_rigid_bodies_actual(self, ):
+        geom = gymutil.WireframeSphereGeometry(0.06, 32, 32, None, color=(1, 0, 0))
+        rigid_body_pos = self.rigid_body_states[:, self._key_body_ids_sim, :3].clone()
+        for i in range(rigid_body_pos.shape[1]):
+            pose = gymapi.Transform(gymapi.Vec3(rigid_body_pos[self.lookat_id, i, 0], rigid_body_pos[self.lookat_id, i, 1], rigid_body_pos[self.lookat_id, i, 2]), r=None)
+            gymutil.draw_lines(geom, self.gym, self.viewer, self.envs[self.lookat_id], pose)
+
+    def _draw_goals(self, ):
+        demo_geom = gymutil.WireframeSphereGeometry(0.2, 32, 32, None, color=(1, 0, 0))
+        
+        pose_robot = self.root_states[self.lookat_id, :3].cpu().numpy()
+        # print(self._curr_demo_obs_buf[self.lookat_id, 2*self.num_dof:2*self.num_dof+3])
+        # demo_pos = (self._curr_demo_root_pos - self.init_root_pos_global_demo + self.init_root_pos_global)[self.lookat_id]
+        # pose = gymapi.Transform(gymapi.Vec3(demo_pos[0], demo_pos[1], demo_pos[2]), r=None)
+        # gymutil.draw_lines(demo_geom, self.gym, self.viewer, self.envs[self.lookat_id], pose)
+        if not self.cfg.depth.use_camera:
+            sphere_geom_arrow = gymutil.WireframeSphereGeometry(0.02, 16, 16, None, color=(1, 0.35, 0.25))
+            # norm = torch.norm(self.target_pos_rel, dim=-1, keepdim=True)
+            # target_vec_norm = self.target_pos_rel / (norm + 1e-5)
+            norm = torch.norm(self._curr_demo_root_vel[:, :2], dim=-1, keepdim=True)
+            target_vec_norm = self._curr_demo_root_vel[:, :2] / (norm + 1e-5)
+            for i in range(5):
+                pose_arrow = pose_robot[:2] + 0.1*(i+3) * target_vec_norm[self.lookat_id, :2].cpu().numpy()
+                pose = gymapi.Transform(gymapi.Vec3(pose_arrow[0], pose_arrow[1], pose_robot[2]), r=None)
+                gymutil.draw_lines(sphere_geom_arrow, self.gym, self.viewer, self.envs[self.lookat_id], pose)
+    
+    def _reward_tracking_demo_goal_vel(self):
+        norm = torch.norm(self._curr_demo_root_vel[:, :3], dim=-1, keepdim=True)
+        target_vec_norm = self._curr_demo_root_vel[:, :3] / (norm + 1e-5)
+        cur_vel = self.root_states[:, 7:10]
+        norm_squeeze = norm.squeeze(-1)
+        rew = torch.minimum(torch.sum(target_vec_norm * cur_vel, dim=-1), norm_squeeze) / (norm_squeeze + 1e-5)
+
+        rew_zeros = torch.exp(-4*torch.norm(cur_vel, dim=-1))
+        small_cmd_ids = (norm<0.1).squeeze(-1)
+        rew[small_cmd_ids] = rew_zeros[small_cmd_ids]
+        # return torch.exp(-2 * torch.norm(cur_vel - self._curr_demo_root_vel[:, :2], dim=-1))
+        return rew.squeeze(-1)
+
+    def _reward_tracking_vx(self):
+        rew = torch.minimum(self.base_lin_vel[:, 0], self.commands[:, 0]) / (self.commands[:, 0] + 1e-5)
+        # print("vx rew", rew, self.base_lin_vel[:, 0], self.commands[:, 0])
+        return rew
+
+    def _reward_tracking_demo_yaw(self):
+        rew = torch.exp(-torch.abs(self.target_yaw - self.yaw))
+        # print("yaw rew", rew, self.target_yaw, self.yaw)
+        return rew
+
+    def _reward_tracking_demo_dof_pos(self):
+        demo_dofs = self._curr_demo_obs_buf[:, :self._n_demo_dof]
+        dof_pos = self.dof_pos[:, self._dof_ids_subset]
+        rew = torch.exp(-0.7 * torch.norm((dof_pos - demo_dofs), dim=1))
+        # print(rew[self.lookat_id].cpu().numpy())
+        # print("dof_pos", dof_pos)
+        # print("demo_dofs", demo_dofs)
+        return rew
+
+    def _reward_tracking_demo_ang_vel(self):
+        demo_ang_vel = self._curr_demo_obs_buf[:, self._n_demo_dof+3:self._n_demo_dof+6]
+        rew = torch.exp(-torch.norm(self.base_ang_vel - demo_ang_vel, dim=1))
+        return rew
+
+    def _reward_tracking_demo_roll_pitch(self):
+        demo_roll_pitch = self._curr_demo_obs_buf[:, self._n_demo_dof+6:self._n_demo_dof+8]
+        cur_roll_pitch = torch.stack((self.roll, self.pitch), dim=1)
+        rew = torch.exp(-torch.norm(cur_roll_pitch - demo_roll_pitch, dim=1))
+        return rew
+
+    def _reward_tracking_demo_height(self):
+        demo_height = self._curr_demo_obs_buf[:, self._n_demo_dof+8]
+        cur_height = self.root_states[:, 2]
+        rew = torch.exp(- 4 * torch.abs(cur_height - demo_height))
+        return rew
+
+
+    def _reward_tracking_demo_key_body(self):
+        # demo_key_body_pos_local = self._curr_demo_obs_buf[:, self.num_dof*2+8:].view(self.num_envs, self._num_key_bodies, 3)[:,self._key_body_ids_sim_subset,:].view(self.num_envs, -1)
+        # cur_key_body_pos_local = global_to_local(self.base_quat, self.rigid_body_states[:, self._key_body_ids_sim[self._key_body_ids_sim_subset], :3], self.root_states[:, :3]).view(self.num_envs, -1)
+        
+        demo_key_body_pos_local = self._curr_demo_keybody.view(self.num_envs, self._num_key_bodies, 3)
+        if self.cfg.motion.global_keybody:
+            curr_demo_xyz = torch.cat((self.target_pos_abs, self._curr_demo_root_pos[:, 2:3]), dim=-1)
+        else:
+            curr_demo_xyz = torch.cat((self.root_states[:, :2], self._curr_demo_root_pos[:, 2:3]), dim=-1)
+        demo_global_body_pos = local_to_global(self._curr_demo_quat, demo_key_body_pos_local, curr_demo_xyz).view(self.num_envs, -1)
+        cur_global_body_pos = self.rigid_body_states[:, self._key_body_ids_sim[self._key_body_ids_sim_subset], :3].view(self.num_envs, -1)
+
+        # cur_local_body_pos = global_to_local(self.base_quat, cur_global_body_pos.view(self.num_envs, -1, 3), self.root_states[:, :3]).view(self.num_envs, -1)
+        # print(cur_local_body_pos)
+        rew = torch.exp(-torch.norm(cur_global_body_pos - demo_global_body_pos, dim=1))
+        # print("key body rew", rew[self.lookat_id].cpu().numpy())
+        return rew
+
+    def _reward_energy(self):
+        return torch.norm(torch.abs(self.torques * self.dof_vel), dim=-1)
+
+    def _reward_feet_height(self):
+        feet_height = self.rigid_body_states[:, self.feet_indices, 2]
+        rew = torch.clamp(torch.norm(feet_height, dim=-1) - 0.2, max=0)
+        rew[self._in_place_flag] = 0
+        # print("height: ", rew[self.lookat_id])
+        return rew
+    
+    def _reward_feet_force(self):
+        rew = torch.norm(self.contact_forces[:, self.feet_indices, 2], dim=-1)
+        rew[rew < 500] = 0
+        rew[rew > 500] -= 500
+        rew[self._in_place_flag] = 0
+        # print(rew[self.lookat_id])
+        # print(self.dof_names)
+        return rew
+
+
+
+
+
+def build_demo_observations(root_pos, root_rot, root_vel, root_ang_vel, dof_pos, dof_vel, key_body_pos, local_key_body_pos, dof_offsets):
+    local_root_ang_vel = quat_rotate_inverse(root_rot, root_ang_vel)
+    local_root_vel = quat_rotate_inverse(root_rot, root_vel)
+        # print(local_root_vel[0])
+
+        # heading_rot = torch_utils.calc_heading_quat_inv(root_rot)
+        # local_root_ang_vel = quat_rotate(heading_rot, root_ang_vel)
+        # local_root_vel = quat_rotate(heading_rot, root_vel)
+        # print(local_root_vel[0], "\n")
+
+        # root_pos_expand = root_pos.unsqueeze(-2)  # [num_envs, 1, 3]
+        # local_key_body_pos = key_body_pos - root_pos_expand
+        
+        # heading_rot_expand = heading_rot.unsqueeze(-2)
+        # heading_rot_expand = heading_rot_expand.repeat((1, local_key_body_pos.shape[1], 1))
+        # flat_end_pos = local_key_body_pos.view(local_key_body_pos.shape[0] * local_key_body_pos.shape[1], local_key_body_pos.shape[2])
+        # flat_heading_rot = heading_rot_expand.view(heading_rot_expand.shape[0] * heading_rot_expand.shape[1], heading_rot_expand.shape[2])
+        # local_end_pos = quat_rotate(flat_heading_rot, flat_end_pos)
+        # flat_local_key_pos = local_end_pos.view(local_key_body_pos.shape[0], local_key_body_pos.shape[1] * local_key_body_pos.shape[2])
+    roll, pitch, yaw = euler_from_quaternion(root_rot)
+    return torch.cat((dof_pos, local_root_vel, local_root_ang_vel, roll[:, None], pitch[:, None], root_pos[:, 2:3], local_key_body_pos.view(local_key_body_pos.shape[0], -1)), dim=-1)   
+
+
+
+
+
+@torch.jit.script
+def reindex_motion_dof(dof, indices_sim, indices_motion, valid_dof_body_ids):
+    dof = dof.clone()
+    dof[:, indices_sim] = dof[:, indices_motion]
+    return dof[:, valid_dof_body_ids]
+
+@torch.jit.script
+def local_to_global(quat, rigid_body_pos, root_pos):
+    num_key_bodies = rigid_body_pos.shape[1]
+    num_envs = rigid_body_pos.shape[0]
+    total_bodies = num_key_bodies * num_envs
+    heading_rot_expand = quat.unsqueeze(-2)
+    heading_rot_expand = heading_rot_expand.repeat((1, num_key_bodies, 1))
+    flat_heading_rot = heading_rot_expand.view(total_bodies, heading_rot_expand.shape[-1])
+
+    flat_end_pos = rigid_body_pos.reshape(total_bodies, 3)
+    global_body_pos = quat_rotate(flat_heading_rot, flat_end_pos).view(num_envs, num_key_bodies, 3) + root_pos[:, None, :3]
+    return global_body_pos
+
+@torch.jit.script
+def global_to_local(quat, rigid_body_pos, root_pos):
+    num_key_bodies = rigid_body_pos.shape[1]
+    num_envs = rigid_body_pos.shape[0]
+    total_bodies = num_key_bodies * num_envs
+    heading_rot_expand = quat.unsqueeze(-2)
+    heading_rot_expand = heading_rot_expand.repeat((1, num_key_bodies, 1))
+    flat_heading_rot = heading_rot_expand.view(total_bodies, heading_rot_expand.shape[-1])
+
+    flat_end_pos = (rigid_body_pos - root_pos[:, None, :3]).view(total_bodies, 3)
+    local_end_pos = quat_rotate_inverse(flat_heading_rot, flat_end_pos).view(num_envs, num_key_bodies, 3)
+    return local_end_pos
+
+@torch.jit.script
+def global_to_local_xy(yaw, global_pos_delta):
+    cos_yaw = torch.cos(yaw)
+    sin_yaw = torch.sin(yaw)
+
+    rotation_matrices = torch.stack([cos_yaw, sin_yaw, -sin_yaw, cos_yaw], dim=2).view(-1, 2, 2)
+    local_pos_delta = torch.bmm(rotation_matrices, global_pos_delta.unsqueeze(-1))
