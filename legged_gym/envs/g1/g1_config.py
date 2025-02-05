@@ -40,7 +40,7 @@ class G1RoughCfg( LeggedRobotCfg ):
         resampling_time = 10. # time before command are changed[s]
         heading_command = False # if true: compute ang vel command from heading error
         class ranges:
-            lin_vel_x = [-2.0, 2.0] # min max [m/s]
+            lin_vel_x = [-1.0, 1.5] # min max [m/s]
             lin_vel_y = [-1.0, 1.0]   # min max [m/s]
             ang_vel_yaw = [-1, 1]    # min max [rad/s]
             heading = [-3.14, 3.14]
@@ -107,6 +107,7 @@ class G1RoughCfg( LeggedRobotCfg ):
   
     class rewards( LeggedRobotCfg.rewards ):
         soft_dof_pos_limit = 0.9
+        # base_height_target = 0.78
         base_height_target = 0.78
         
         class scales( LeggedRobotCfg.rewards.scales ):
@@ -130,11 +131,22 @@ class G1RoughCfg( LeggedRobotCfg ):
             straight_knee = 5
             # upper_body = 0
             feet_drag = -0.1
-            upper_body_roll = 1
-            center_of_mass_stability = 1
+            # upper_body_roll = 1
+            # center_of_mass_stability = 0.5
+            # minimize_com_velocity = 1.0
+
             # upper_body_pitch = 0.1
             # rpy = 1
-
+            # tracking_pelvis_roll= 1.0
+            # tracking_waist_roll= 1.5
+            tracking_torso_roll= 1.5
+            # tracking_pelvis_pitch= 1.0
+            # tracking_waist_pitch= 1.0
+            tracking_torso_pitch= 1.0
+            # minimize_upper_body_angular_velocity = 1.0
+            minimize_torso_angular_velocity = 1.0
+            # tracking_roll= 1.5
+            # tracking_pitch = 0.5
 
 class G1RoughCfgPPO( LeggedRobotCfgPPO ):
     class policy:

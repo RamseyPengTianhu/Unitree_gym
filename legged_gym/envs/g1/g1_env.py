@@ -54,7 +54,7 @@ class G1Robot(LeggedRobot):
         self.upper_body_rpy = torch.zeros(self.num_envs,4)
         self._init_upper_body()
         self.base_orn_rp = self.get_body_orientation() # [r, p]
-        self.com = self.calculate_center_of_mass()
+        self.com = self.calculate_upper_body_com_local()
         
 
 
@@ -68,33 +68,87 @@ class G1Robot(LeggedRobot):
 
     def _extract_upper_body_rpy(self):
         """
-        Extract roll, pitch, and yaw for the upper body from the rigid body states.
+        Extract roll, pitch, and yaw for the pelvis, waist_roll_link, and torso_link individually,
+        then sum the absolute values of their RPYs together.
 
         Returns:
-            tuple: Roll, pitch, and yaw as NumPy floats.
+            torch.Tensor: Summed absolute roll, pitch, and yaw values for the upper body.
         """
-        # self.upper_body_index = [13,14]
-        upper_body_names = ['pelvis', 'waist_roll_link','torso_link']
-        # upper_body_names = [ 'torso_link']
-        self.upper_body_index = [self.body_names.index(name) for name in upper_body_names]
+        upper_body_names = ['pelvis', 'waist_roll_link', 'torso_link']
 
-        # Extract upper body state
-        upper_body_state = self.rigid_body_states_view[:, self.upper_body_index, :]
-        upper_quaternions = upper_body_state[:, :, 3:7]  # Extract quaternions
-        upper_body_rpy = get_euler_xyz_in_tensor(upper_quaternions.view(-1, 4))  # Shape: [num_envs * 3, 3]
+        # Extract indices for each body part separately
+        pelvis_idx = self.body_names.index('pelvis')
+        waist_idx = self.body_names.index('waist_roll_link')
+        torso_idx = self.body_names.index('torso_link')
+
+        # Extract states for each body part separately
+        pelvis_state = self.rigid_body_states_view[:, pelvis_idx, :]
+        waist_state = self.rigid_body_states_view[:, waist_idx, :]
+        torso_state = self.rigid_body_states_view[:, torso_idx, :]
+
+        # Extract quaternions
+        pelvis_quat = pelvis_state[:, 3:7]  # Quaternion for pelvis
+        waist_quat = waist_state[:, 3:7]    # Quaternion for waist_roll_link
+        torso_quat = torso_state[:, 3:7]    # Quaternion for torso_link
+
+        # Convert quaternions to roll, pitch, yaw
+        pelvis_rpy = get_euler_xyz_in_tensor(pelvis_quat)  # Shape: [num_envs, 3]
+        waist_rpy = get_euler_xyz_in_tensor(waist_quat)    # Shape: [num_envs, 3]
+        torso_rpy = get_euler_xyz_in_tensor(torso_quat)    # Shape: [num_envs, 3]
+
+        # Compute the sum of absolute values
+        upper_body_rpy_sum = torch.abs(pelvis_rpy) + torch.abs(waist_rpy) + torch.abs(torso_rpy)
 
 
-        # Convert to NumPy
-        return upper_body_rpy
+
+
+        return upper_body_rpy_sum, pelvis_rpy, waist_rpy, torso_rpy
+
+    def _extract_upper_body_angular_velocity(self):
+        """
+        Extract angular velocities (roll rate, pitch rate, yaw rate) for the pelvis, 
+        waist_roll_link, and torso_link individually.
+
+        Returns:
+            tuple: Summed absolute angular velocities and individual angular velocities 
+                for pelvis, waist, and torso.
+        """
+        upper_body_names = ['pelvis', 'waist_roll_link', 'torso_link']
+
+        # Extract indices for each body part separately
+        pelvis_idx = self.body_names.index('pelvis')
+        waist_idx = self.body_names.index('waist_roll_link')
+        torso_idx = self.body_names.index('torso_link')
+
+        # Extract angular velocity states for each body part
+        pelvis_state = self.rigid_body_states_view[:, pelvis_idx, :]
+        waist_state = self.rigid_body_states_view[:, waist_idx, :]
+        torso_state = self.rigid_body_states_view[:, torso_idx, :]
+
+        # Extract angular velocity components (indices 10:13)
+        pelvis_ang_vel = pelvis_state[:, 10:13]  # Shape: [num_envs, 3]
+        waist_ang_vel = waist_state[:, 10:13]    # Shape: [num_envs, 3]
+        torso_ang_vel = torso_state[:, 10:13]    # Shape: [num_envs, 3]
+
+        # Compute the sum of absolute angular velocities
+        upper_body_ang_vel_sum = torch.abs(pelvis_ang_vel) + torch.abs(waist_ang_vel) + torch.abs(torso_ang_vel)
+
+        return upper_body_ang_vel_sum, pelvis_ang_vel, waist_ang_vel, torso_ang_vel
 
     def _init_upper_body(self):
         """
         Initialize upper body roll, pitch, and yaw.
         """
-        upper_body_rpy = self._extract_upper_body_rpy()
+        upper_body_rpy, pelvis_rpy, waist_rpy, torso_rpy = self._extract_upper_body_rpy()
         self.upper_roll = upper_body_rpy[:,0]
         self.upper_pitch = upper_body_rpy[:,1]
         self.upper_yaw = upper_body_rpy[:,2]
+        self.pelvis_roll = pelvis_rpy[:,0]
+        self.waist_roll = waist_rpy[:,0]
+        self.torso_roll = torso_rpy[:,0]
+        self.pelvis_pitch = pelvis_rpy[:,1]
+        self.waist_pitch = waist_rpy[:,1]
+        self.torso_pitch = torso_rpy[:,1]
 
     def update_body_state(self):
         """
@@ -104,11 +158,17 @@ class G1Robot(LeggedRobot):
         self.gym.refresh_rigid_body_state_tensor(self.sim)
 
         # Update upper body RPY
-        upper_body_rpy = self._extract_upper_body_rpy()
+        upper_body_rpy, pelvis_rpy, waist_rpy, torso_rpy = self._extract_upper_body_rpy()
         
         self.upper_roll = upper_body_rpy[:,0]
         self.upper_pitch = upper_body_rpy[:,1]
         self.upper_yaw = upper_body_rpy[:,2]
+        self.pelvis_roll = pelvis_rpy[:,0]
+        self.waist_roll = waist_rpy[:,0]
+        self.torso_roll = torso_rpy[:,0]
+        self.pelvis_pitch = pelvis_rpy[:,1]
+        self.waist_pitch = waist_rpy[:,1]
+        self.torso_pitch = torso_rpy[:,1]
 
 
     def calculate_center_of_mass(self):
@@ -146,11 +206,107 @@ class G1Robot(LeggedRobot):
         com = torch.sum(body_positions * body_masses.unsqueeze(-1), dim=1) / total_mass
 
         return com  # Shape: [num_envs, 3]
+
+
+    def calculate_upper_body_com(self):
+        """
+        Calculate the Center of Mass (CoM) for the upper body only.
+
+        Returns:
+            torch.Tensor: The CoM position for each environment (shape: [num_envs, 3]).
+        """
+        upper_body_names = ['pelvis', 'waist_roll_link', 'torso_link']
+
+        # Get indices of upper body parts
+        upper_body_indices = [self.body_names.index(name) for name in upper_body_names]
+
+        # Extract states for upper body parts
+        upper_body_states = self.rigid_body_states_view[:, upper_body_indices, :]
+        upper_body_positions = upper_body_states[:, :, :3]  # Extract [x, y, z] positions
+
+        # Retrieve mass properties for upper body parts
+        body_masses = torch.tensor([
+        [self.gym.get_actor_rigid_body_properties(self.envs[env_id], self.actor_handles[env_id])[idx].mass 
+         for idx in upper_body_indices]  # Get masses using indices
+        for env_id in range(self.num_envs)
+    ], dtype=torch.float, device=self.device)  # Shape: [num_envs, num_upper_bodies]
+
+        # Compute total mass for the upper body
+        total_mass = torch.sum(body_masses, dim=1, keepdim=True)  # Shape: [num_envs, 1]
+
+        # Prevent division by zero
+        total_mass = torch.clamp(total_mass, min=1e-6)
+
+        # Compute weighted sum of positions for upper body CoM
+        upper_body_com = torch.sum(upper_body_positions * body_masses.unsqueeze(-1), dim=1) / total_mass
+
+        return upper_body_com  # Shape: [num_envs, 3]
+
+    def calculate_upper_body_com_local(self):
+        """
+        Calculate the Center of Mass (CoM) for the upper body relative to the pelvis (local frame).
+
+        Returns:
+            torch.Tensor: The upper body CoM relative to the pelvis for each environment (shape: [num_envs, 3]).
+        """
+        upper_body_names = ['pelvis', 'waist_roll_link', 'torso_link']
+
+        # Get indices of upper body parts
+        upper_body_indices = [self.body_names.index(name) for name in upper_body_names]
+        pelvis_idx = self.body_names.index('pelvis')
+
+        # Extract positions for upper body parts
+        upper_body_states = self.rigid_body_states_view[:, upper_body_indices, :]
+        upper_body_positions = upper_body_states[:, :, :3]  # Extract [x, y, z] positions
+
+        # Retrieve mass properties for upper body parts by index
+        body_masses = torch.tensor([
+            [self.gym.get_actor_rigid_body_properties(self.envs[env_id], self.actor_handles[env_id])[idx].mass 
+            for idx in upper_body_indices]
+            for env_id in range(self.num_envs)
+        ], dtype=torch.float, device=self.device)  # Shape: [num_envs, num_upper_bodies]
+
+        # Compute total mass for the upper body
+        total_mass = torch.sum(body_masses, dim=1, keepdim=True)  # Shape: [num_envs, 1]
+
+        # Prevent division by zero
+        total_mass = torch.clamp(total_mass, min=1e-6)
+
+        # Compute global CoM of upper body
+        upper_body_com_global = torch.sum(upper_body_positions * body_masses.unsqueeze(-1), dim=1) / total_mass  # Shape: [num_envs, 3]
+
+        # Extract pelvis position (reference frame)
+        pelvis_position = self.rigid_body_states_view[:, pelvis_idx, :3]  # Shape: [num_envs, 3]
+
+        # Compute local CoM relative to pelvis
+        upper_body_com_local = upper_body_com_global - pelvis_position  # Shape: [num_envs, 3]
+
+        return upper_body_com_local
+
+
+    def calculate_upper_body_com_local_velocity(self):
+        """
+        Calculate the velocity of the Center of Mass (CoM) for the upper body relative to the whole body,
+        normalized by the timestep (dt).
+        
+        Args:
+            dt (float): Time interval between steps (default: 1.0).
+        
+        Returns:
+            torch.Tensor: The velocity of the upper body CoM relative to the whole body CoM 
+                        for each environment (shape: [num_envs, 3]).
+        """
+        upper_body_com_local = self.calculate_upper_body_com_local()  # Current CoM
+        if not hasattr(self, "prev_upper_body_com_local"):
+            self.prev_upper_body_com_local = torch.zeros_like(upper_body_com_local)
+        upper_body_com_velocity = (upper_body_com_local - self.prev_upper_body_com_local) / self.dt
+        self.prev_upper_body_com_local = upper_body_com_local.clone()
+        return upper_body_com_velocity
         
     def _post_physics_step_callback(self):
         self.update_feet_state()
         self.update_body_state()
-        self.com = self.calculate_center_of_mass()
+        self.com = self.calculate_upper_body_com_local()
 
 
         period = 0.8
@@ -455,7 +611,7 @@ class G1Robot(LeggedRobot):
 
 
 
-    def _reward_center_of_mass_stability(self, weight=1.0):
+    def _reward_center_of_mass_stability(self):
         """
         Calculate a reward for maintaining CoM stability in the X and Y directions.
 
@@ -466,20 +622,149 @@ class G1Robot(LeggedRobot):
             torch.Tensor: The reward value.
         """
         # Compute current Center of Mass
-        self.com = self.calculate_center_of_mass()  # Shape: [num_envs, 3]
+        self.com = self.calculate_upper_body_com_local()  # Shape: [num_envs, 3]
 
         # Desired CoM in X and Y (keep Z free)
         desired_com = torch.zeros_like(self.com)  # Default target at [0, 0, free]
         desired_com[:, 2] = self.com[:, 2]  # Keep Z unchanged
 
-        # Compute squared distance in X and Y only
-        stability_penalty = torch.sum((self.com[:, :2] - desired_com[:, :2]) ** 2, dim=1)
+        
+        rew = torch.exp(-torch.norm(self.com - desired_com, dim=1))
 
         # Reward is the negative penalty, scaled by weight
-        return -weight * stability_penalty  # Higher reward for lower deviation
+        return rew   # Higher reward for lower deviation
+
+
+    def _reward_minimize_com_velocity(self):
+        """
+        Penalize excessive movement of the upper body CoM to reduce oscillation.
+        """
+        com_velocity = self.com - self.prev_com  # Change in CoM between steps
+        self.prev_com = self.com.clone()  # Store current CoM for the next step
+
+        rew = torch.exp(-torch.norm(com_velocity, dim=1))  # Penalize large velocity
+        return rew
+
 
     
+    def _reward_feet_edge(self):
+        feet_pos_xy = ((self.rigid_body_states[:, self.feet_indices, :2] + self.terrain.cfg.border_size) / self.cfg.terrain.horizontal_scale).round().long()  # (num_envs, 4, 2)
+        feet_pos_xy[..., 0] = torch.clip(feet_pos_xy[..., 0], 0, self.x_edge_mask.shape[0]-1)
+        feet_pos_xy[..., 1] = torch.clip(feet_pos_xy[..., 1], 0, self.x_edge_mask.shape[1]-1)
+        feet_at_edge = self.x_edge_mask[feet_pos_xy[..., 0], feet_pos_xy[..., 1]]
+    
+        self.feet_at_edge = self.contact_filt & feet_at_edge
+        rew = (self.terrain_levels > 3) * torch.sum(self.feet_at_edge, dim=-1)
+        return rew
 
+
+    def _reward_tracking_pelvis_roll(self):
+
+        
+        demo_roll = torch.zeros(self.num_envs, 1, device = self.device)
+        rew = torch.exp(-torch.norm(self.pelvis_roll - demo_roll, dim=1))
+        return rew
+    def _reward_tracking_torso_roll(self):
+
+        
+        demo_roll = torch.zeros(self.num_envs, 1, device = self.device)
+        rew = torch.exp(-torch.norm(self.torso_roll - demo_roll, dim=1))
+        return rew
+    def _reward_tracking_waist_roll(self):
+
+        
+        demo_roll = torch.zeros(self.num_envs, 1, device = self.device)
+        rew = torch.exp(-torch.norm(self.waist_roll - demo_roll, dim=1))
+        return rew
+    
+
+    def _reward_tracking_pelvis_pitch(self):
+
+        
+        demo_pitch = torch.zeros(self.num_envs, 1, device = self.device)
+        rew = torch.exp(-torch.norm(self.pelvis_pitch - demo_pitch, dim=1))
+        return rew
+
+    def _reward_tracking_torso_pitch(self):
+
+        
+        demo_pitch = torch.zeros(self.num_envs, 1, device = self.device)
+        rew = torch.exp(-torch.norm(self.torso_pitch - demo_pitch, dim=1))
+        return rew
+    def _reward_tracking_waist_pitch(self):
+
+        
+        demo_pitch = torch.zeros(self.num_envs, 1, device = self.device)
+        rew = torch.exp(-torch.norm(self.waist_pitch - demo_pitch, dim=1))
+        return rew
+
+    def _reward_tracking_pitch(self):
+        demo_pitch = torch.zeros(self.num_envs, 1, device = self.device)
+        rew = torch.exp(-torch.norm(self.upper_pitch - demo_pitch, dim=1))
+        return rew
+
+    def _reward_tracking_roll_pitch(self):
+        cur_roll_pitch = torch.stack((self.upper_roll, self.upper_pitch), dim=1)
+        demo_roll_pitch = torch.zeros(self.num_envs, 2, device = self.device)
+        rew = torch.exp(-torch.norm(cur_roll_pitch - demo_roll_pitch, dim=1))
+        return rew
+
+
+    # def _reward_minimize_upper_body_angular_velocity(self):
+    #     """
+    #     Penalize large angular velocities in the upper body to stabilize motion.
+
+    #     Returns:
+    #         torch.Tensor: The reward value for minimizing angular velocity.
+    #     """
+    #     _, pelvis_ang_vel, waist_ang_vel, torso_ang_vel = self._extract_upper_body_angular_velocity()
+
+    #     # Combine all angular velocities
+    #     upper_body_ang_vel = torch.cat([pelvis_ang_vel, waist_ang_vel, torso_ang_vel], dim=1)  # Shape: [num_envs, 9]
+
+    #     # Compute penalty for angular velocity magnitude
+    #     angular_velocity_penalty = torch.norm(upper_body_ang_vel, dim=1)  # Shape: [num_envs]
+
+    #     # Reward is inversely proportional to the penalty
+    #     reward = torch.exp(-angular_velocity_penalty)  # Penalize high angular velocity
+    #     return reward
+    def _reward_minimize_torso_angular_velocity(self):
+        """
+        Penalize large angular velocities in the upper body to stabilize motion.
+
+        Returns:
+            torch.Tensor: The reward value for minimizing angular velocity.
+        """
+        _, pelvis_ang_vel, waist_ang_vel, torso_ang_vel = self._extract_upper_body_angular_velocity()
+
+
+        # Compute penalty for angular velocity magnitude
+        angular_velocity_penalty = torch.norm(torso_ang_vel, dim=1)  # Shape: [num_envs]
+
+        # Reward is inversely proportional to the penalty
+        reward = torch.exp(-angular_velocity_penalty)  # Penalize high angular velocity
+        return reward
+
+
+    def _reward_minimize_com_velocity(self):
+        """
+        Reward to penalize excessive upper body CoM velocity to reduce oscillations.
+
+        Returns:
+            torch.Tensor: Reward values for minimizing CoM velocity.
+        """
+        # Compute the velocity of the upper body CoM
+        com_velocity = self.calculate_upper_body_com_local_velocity()  # Shape: [num_envs, 3]
+
+        # Compute the magnitude of the velocity
+        velocity_magnitude = torch.norm(com_velocity, dim=1)  # Shape: [num_envs]
+
+        # Reward is inversely proportional to the velocity magnitude
+        reward = torch.exp(-velocity_magnitude)  # Higher reward for lower velocity
+        return reward
+
+
+    
 
 
     def init_motions(self, cfg):

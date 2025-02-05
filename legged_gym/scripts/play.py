@@ -43,10 +43,21 @@ def save_states_to_csv(state_log, dt, output_dir):
             df.columns = [key]
         df.to_csv(os.path.join(output_dir, f'{key}.csv'), index=False)
 
-def update_camera_position(env, robot_index, camera_offset):
+def update_camera_position(env, robot_index, view_mode="side"):
     """Update the camera position to track the robot."""
+    
     # Get the robot's current position
     robot_position = env.root_states[robot_index, :3].cpu().numpy()
+    
+    # Define camera offsets based on view mode
+    camera_offsets = {
+        "side": np.array([0.0, -3.0, 1.0]),  # Side view (default)
+        "front": np.array([3.0, 0.0, 1.0]),  # Front view
+        "back": np.array([-3.0, 0.0, 1.0]),  # Back view
+    }
+    
+    # Select the appropriate offset
+    camera_offset = camera_offsets.get(view_mode, camera_offsets["side"])
 
     # Calculate the new camera position
     new_camera_position = robot_position + camera_offset
@@ -104,59 +115,60 @@ def plot_deviations(state_log, save_path=None):
 
 def plot_upper_body_orientation(state_log, save_path=None):
     """
-    Plot pitch, roll, and yaw for the upper body.
+    Plot roll and pitch for the pelvis, waist, and torso separately.
 
     Args:
         state_log (dict): Dictionary containing the logged data (tensors or arrays).
-        save_path (str): Path to save the plot. If None, the plot will just be shown.
+        save_path (str, optional): Path to save the plot. If None, the plots will be shown.
     """
-    plt.figure(figsize=(10, 6))
 
-    # Safely handle tensors on GPU or CPU
+    # Helper function: Convert tensors to NumPy safely
     def to_numpy(tensor):
         if isinstance(tensor, torch.Tensor):
             return tensor.cpu().numpy()  # Move to CPU and convert to NumPy
-        return np.array(tensor)  # Convert list of arrays to NumPy array
+        return np.array(tensor)  # Convert list/array to NumPy
 
-    # Define body part labels and line styles
     body_parts = ["Pelvis", "Waist", "Torso"]
     line_styles = ['-', '--', ':']  # Different line styles for clarity
+    colors = ['b', 'g', 'r']  # Blue, Green, Red for pitch and roll separately
 
-    # # Convert and plot pitch
-    # if 'pitch' in state_log:
-    #     pitch = to_numpy(state_log['pitch'])
-    #     pitch = np.array(pitch)  # Ensure proper shape
-    #     print("Pitch shape:", pitch.shape)  # Debugging
-        
-    #     # Plot each body part separately
-    #     for i in range(min(3, pitch.shape[1])):  # Avoid index errors
-    #         plt.plot(pitch[:, i], linestyle=line_styles[i % len(line_styles)], label=f'Pitch - {body_parts[i]}')
-
-    # Convert and plot roll
-    if 'roll' in state_log:
-        roll = to_numpy(state_log['roll'])
-        roll = np.array(roll)
-        print("Roll shape:", roll.shape)
-        
-        # Plot each body part separately
-        for i in range(min(3, roll.shape[1])):
-            plt.plot(roll[:, i], linestyle=line_styles[i % len(line_styles)], label=f'Roll - {body_parts[i]}')
-
-    # Yaw is optional, uncomment if needed
-    # if 'yaw' in state_log:
-    #     yaw = to_numpy(state_log['yaw'])
-    #     plt.plot(yaw, label='Yaw')
-
-    # Add labels and title
+    # ---- PLOT PITCH ----
+    plt.figure(figsize=(10, 6))
+    for i, body_part in enumerate(body_parts):
+        key = f"{body_part.lower()}_pitch"
+        if key in state_log:
+            pitch_data = to_numpy(state_log[key])
+            plt.plot(pitch_data, linestyle=line_styles[i % len(line_styles)], color=colors[i], label=f'Pitch - {body_part}')
+    
     plt.xlabel('Time Steps')
-    plt.ylabel('Orientation (Radians)')
-    plt.title('Upper Body Orientation (Pitch & Roll)')
+    plt.ylabel('Pitch (Radians)')
+    plt.title('Upper Body Pitch Orientation')
     plt.legend()
+    plt.grid(True, linestyle='--', alpha=0.6)
 
-    # Save or show the plot
     if save_path:
-        plt.savefig(save_path)
-        print(f"Plot saved to {save_path}")
+        plt.savefig(save_path.replace(".png", "_pitch.png"), dpi=300, bbox_inches='tight')
+        print(f"📊 Pitch plot saved to {save_path.replace('.png', '_pitch.png')}")
+    else:
+        plt.show()
+
+    # ---- PLOT ROLL ----
+    plt.figure(figsize=(10, 6))
+    for i, body_part in enumerate(body_parts):
+        key = f"{body_part.lower()}_roll"
+        if key in state_log:
+            roll_data = to_numpy(state_log[key])
+            plt.plot(roll_data, linestyle=line_styles[i % len(line_styles)], color=colors[i], label=f'Roll - {body_part}')
+    
+    plt.xlabel('Time Steps')
+    plt.ylabel('Roll (Radians)')
+    plt.title('Upper Body Roll Orientation')
+    plt.legend()
+    plt.grid(True, linestyle='--', alpha=0.6)
+
+    if save_path:
+        plt.savefig(save_path.replace(".png", "_roll.png"), dpi=300, bbox_inches='tight')
+        print(f"📊 Roll plot saved to {save_path.replace('.png', '_roll.png')}")
     else:
         plt.show()
 
@@ -211,6 +223,129 @@ def plot_com(state_log, save_path=None):
         plt.show()
 
 
+def plot_waist_torso_joint_angles(state_log, save_path=None):
+    """
+    Plot joint angles of the waist over time.
+
+    Args:
+        state_log (dict): Dictionary containing the logged joint angle data.
+        save_path (str, optional): Path to save the plots. If None, plots are shown.
+    """
+
+    # Helper function to safely convert tensors to NumPy arrays
+    def to_numpy(tensor):
+        if isinstance(tensor, torch.Tensor):
+            return tensor.cpu().numpy()
+        return np.array(tensor)
+
+    plt.figure(figsize=(10, 6))
+    
+    # Joint names as per your robot's joint order
+    waist_joint_names = [ 'waist_roll_joint', 'waist_pitch_joint']
+    colors = ['g', 'r']  # Blue, Green, Red for different joints
+    
+    # Plot each joint angle if it exists in state_log
+    for i, joint in enumerate(waist_joint_names):
+        if joint in state_log:
+            joint_data = to_numpy(state_log[joint])
+            plt.plot(joint_data, color=colors[i % len(colors)], label=joint.replace('_', ' ').title())
+
+    # Formatting
+    plt.xlabel('Time Steps')
+    plt.ylabel('Joint Angle (Radians)')
+    plt.title('Waist Joint Angles Over Time')
+    plt.legend()
+    plt.grid(True, linestyle='--', alpha=0.6)
+
+    # Save or show the plot
+    if save_path:
+        plt.savefig(save_path, dpi=300, bbox_inches='tight')
+        print(f"📊 Joint angles plot saved to {save_path}")
+    else:
+        plt.show()
+
+
+def plot_joint_and_orientation_every_100_steps(state_log, save_dir="plots"):
+    """
+    Plot roll and pitch joint angles alongside their corresponding upper body orientations every 100 steps.
+
+    Args:
+        state_log (dict): Dictionary containing the logged data.
+        save_dir (str): Directory to save the plots. Defaults to "plots".
+    """
+    # Ensure the save directory exists
+    os.makedirs(save_dir, exist_ok=True)
+
+    # Helper function to safely convert tensors to NumPy
+    def to_numpy(tensor):
+        if isinstance(tensor, torch.Tensor):
+            return tensor.cpu().numpy()
+        return np.array(tensor)
+
+    # Get total time steps from the state log
+    total_steps = len(state_log["waist_roll_joint"]) if "waist_roll_joint" in state_log else 0
+    step_interval = 100
+
+    # Iterate over time steps in chunks of 100
+    for start_step in range(0, total_steps, step_interval):
+        end_step = min(start_step + step_interval, total_steps)
+
+        # ---- PLOT ROLL: Joint vs Orientation ----
+        plt.figure(figsize=(10, 6))
+        if "waist_roll_joint" in state_log and "waist_roll" in state_log:
+            joint_roll = to_numpy(state_log["waist_roll_joint"])[start_step:end_step]
+            orientation_roll = to_numpy(state_log["waist_roll"])[start_step:end_step]
+            torso_roll = to_numpy(state_log["torso_roll"])[start_step:end_step]
+            pelvis_roll = to_numpy(state_log["pelvis_roll"])[start_step:end_step]
+
+            # Plot joint roll
+            plt.plot(joint_roll, label="Waist Roll Joint", color="g", linestyle="--")
+            # Plot orientation roll
+            plt.plot(orientation_roll, label="Waist Roll Orientation", color="b", linestyle="-")
+            plt.plot(torso_roll, label="Torso Roll Orientation", color="r", linestyle="-")
+            plt.plot(pelvis_roll, label="Pelvis_Roll Orientation", color="m", linestyle="-")
+
+        # Formatting
+        plt.xlabel("Time Steps")
+        plt.ylabel("Roll (Radians)")
+        plt.title(f"Waist Roll Joint and Orientation Comparison ({start_step}-{end_step})")
+        plt.legend()
+        plt.grid(True, linestyle="--", alpha=0.6)
+
+        # Save the plot
+        roll_save_path = os.path.join(save_dir, f"roll_comparison_{start_step}_{end_step}.png")
+        plt.savefig(roll_save_path, dpi=300, bbox_inches="tight")
+        plt.close()
+
+        # ---- PLOT PITCH: Joint vs Orientation ----
+        plt.figure(figsize=(10, 6))
+        if "waist_pitch_joint" in state_log and "waist_pitch" in state_log:
+            joint_pitch = to_numpy(state_log["waist_pitch_joint"])[start_step:end_step]
+            orientation_pitch = to_numpy(state_log["waist_pitch"])[start_step:end_step]
+            torso_pitch = to_numpy(state_log["torso_pitch"])[start_step:end_step]
+            pelvis_pitch = to_numpy(state_log["pelvis_pitch"])[start_step:end_step]
+
+            # Plot joint pitch
+            plt.plot(joint_pitch, label="Waist Pitch Joint", color="r", linestyle="--")
+            # Plot orientation pitch
+            plt.plot(orientation_pitch, label="Waist Pitch Orientation", color="m", linestyle="-")
+            plt.plot(torso_pitch, label="Torso Pitch Orientation", color="g", linestyle="-")
+            plt.plot(pelvis_pitch, label="Pelvis_pitch Orientation", color="b", linestyle="-")
+
+        # Formatting
+        plt.xlabel("Time Steps")
+        plt.ylabel("Pitch (Radians)")
+        plt.title(f"Waist Pitch Joint and Orientation Comparison ({start_step}-{end_step})")
+        plt.legend()
+        plt.grid(True, linestyle="--", alpha=0.6)
+
+        # Save the plot
+        pitch_save_path = os.path.join(save_dir, f"pitch_comparison_{start_step}_{end_step}.png")
+        plt.savefig(pitch_save_path, dpi=300, bbox_inches="tight")
+        plt.close()
+
+        print(f"Plots saved for steps {start_step}-{end_step}")
+
 def play(args):
     env_cfg, train_cfg = task_registry.get_cfgs(name=args.task)
     # Override some parameters for testing
@@ -225,11 +360,18 @@ def play(args):
 
     env_cfg.env.test = True
     robot_index = 0  # Index of the robot to track
-    stop_state_log = 1000  # Number of steps for logging
+    stop_state_log = 1000 # Number of steps for logging
     joint_index = 4
     # Indices for the upper body links
 
-    camera_offset = np.array([0.0, -3.0, 1.0])  # Adjust this offset as needed
+    # Side View (Default)
+    side_view_offset = np.array([0.0, -3.0, 1.0])  # Left/Right side
+
+    # Front View
+    front_view_offset = np.array([3.0, 0.0, 1.0])  # In front of the robot
+
+    # Back View
+    back_view_offset = np.array([-3.0, 0.0, 1.0])  # Behind the robot
 
     # Prepare environment
     env, _ = task_registry.make_env(name=args.task, args=args, env_cfg=env_cfg)
@@ -252,7 +394,7 @@ def play(args):
         export_policy_as_jit(ppo_runner.alg.actor_critic, path)
         print('Exported policy as jit script to: ', path)
 
-    for i in range(1 * int(env.max_episode_length)):
+    for i in range(5 * int(env.max_episode_length)):
         # Check and update command ranges
         command_interface = _check_command_interface()
         _update_command_ranges(env, command_interface)
@@ -261,13 +403,23 @@ def play(args):
         
 
 
-        upper_body_rpy = env._extract_upper_body_rpy()
+        upper_body_rpy, pelvis_rpy, waist_rpy, torso_rpy = env._extract_upper_body_rpy()
         upper_body_rpy_numpy = upper_body_rpy.detach().cpu().numpy()
+        pelvis_rpy = pelvis_rpy.detach().cpu().numpy()
+        waist_rpy = waist_rpy.detach().cpu().numpy()
+        torso_rpy = torso_rpy.detach().cpu().numpy()
+        pelvis_roll = pelvis_rpy[:,0]
+        waist_roll = waist_rpy[:,0]
+        torso_roll = torso_rpy[:,0]
+        pelvis_pitch = pelvis_rpy[:,1]
+        waist_pitch = waist_rpy[:,1]
+        torso_pitch = torso_rpy[:,1]
+
         upper_roll = upper_body_rpy_numpy[:,0]
-        print('upper_roll.shape:',upper_roll)
         upper_pitch = upper_body_rpy_numpy[:,1]
         upper_yaw = upper_body_rpy_numpy[:,2]
-        com = env.calculate_center_of_mass()
+        # com = env.calculate_center_of_mass()
+        com = env.calculate_upper_body_com_local()
         com = com.detach().cpu().numpy()
         com_x = com[:,0]
         com_y = com[:,1]
@@ -278,7 +430,10 @@ def play(args):
 
         # Update the camera position dynamically
         if MOVE_CAMERA:
-            update_camera_position(env, robot_index, camera_offset)
+            # update_camera_position(env, robot_index, camera_offset)
+            # update_camera_position(env, robot_index, view_mode="front")  # Front view
+            # update_camera_position(env, robot_index, view_mode="back")   # Back view
+            update_camera_position(env, robot_index, view_mode="side")   # Side view (default)
 
         # Optional: Add logic for rendering or saving frames if needed
         if RECORD_FRAMES and i % 2 == 0:
@@ -296,10 +451,19 @@ def play(args):
                     'pitch': upper_pitch,
                     'roll': upper_roll,
                     'yaw': upper_yaw,
+                    'pelvis_pitch': pelvis_pitch,
+                    'pelvis_roll': pelvis_roll,
+                    'waist_pitch': waist_pitch,
+                    'waist_roll': waist_roll,
+                    'torso_roll': torso_roll,
+                    'torso_pitch': torso_pitch,
                     'com_x':com_x,
                     'com_y':com_y,
                     'dof_pos_target': actions[robot_index, joint_index].item() * env.cfg.control.action_scale,
                     'dof_pos': env.dof_pos[robot_index, joint_index].item(),
+                    'waist_roll_joint': env.dof_pos[robot_index, 12].item(),
+                    'waist_pitch_joint': env.dof_pos[robot_index, 13].item(),
+
                     'Left_knee_pos': env.dof_pos[robot_index, 3].item(),
                     'Right_knee_pos': env.dof_pos[robot_index, 9].item(),
                     'dof_vel': env.dof_vel[robot_index, joint_index].item(),
@@ -315,7 +479,7 @@ def play(args):
                 }
             )
         elif i == stop_state_log:
-            # logger.plot_states()
+            logger.plot_states()
             # plot_deviations(logger.state_log, save_path='/home/tianhu/unitree_rl_gym/logs/upper_body_deviations.png')
             plot_upper_body_orientation(
             logger.state_log, 
@@ -325,6 +489,16 @@ def play(args):
             logger.state_log, 
             save_path='/home/tianhu/unitree_rl_gym/logs/com.png'
     )
+            plot_waist_torso_joint_angles(
+            logger.state_log, 
+            save_path='/home/tianhu/unitree_rl_gym/logs/waist_roll_pitch_joint.png'
+    )
+    
+            plot_joint_and_orientation_every_100_steps(
+            logger.state_log, 
+            save_dir='/home/tianhu/unitree_rl_gym/logs/upper_body_plots'
+    )
+
             pass
 
         # Logging rewards
@@ -342,7 +516,7 @@ def play(args):
 if __name__ == '__main__':
     EXPORT_POLICY = True
     RECORD_FRAMES = False
-    MOVE_CAMERA = False
+    MOVE_CAMERA = True
     args = get_args()
     play(args)
 
