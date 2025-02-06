@@ -44,11 +44,11 @@ class G1RoughCfg( LeggedRobotCfg ):
             lin_vel_y = [-1.0, 1.0]   # min max [m/s]
             ang_vel_yaw = [-1, 1]    # min max [rad/s]
             heading = [-3.14, 3.14]
-        class ranges:
-            lin_vel_x = [0.0, 0] # min max [m/s]
-            lin_vel_y = [0.0, 0]   # min max [m/s]
-            ang_vel_yaw = [0, 0]    # min max [rad/s]
-            heading = [0, 0]
+        # class ranges:
+        #     lin_vel_x = [0.0, 0] # min max [m/s]
+        #     lin_vel_y = [0.0, 0]   # min max [m/s]
+        #     ang_vel_yaw = [0, 0]    # min max [rad/s]
+        #     heading = [0, 0]
 
 
 
@@ -128,7 +128,7 @@ class G1RoughCfg( LeggedRobotCfg ):
             contact_no_vel = -0.2
             feet_swing_height = -20.0
             contact = 0.18
-            straight_knee = 5
+            straight_knee = 3
             # upper_body = 0
             feet_drag = -0.1
             # upper_body_roll = 1
