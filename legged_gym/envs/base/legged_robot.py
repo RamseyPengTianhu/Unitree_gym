@@ -581,7 +581,9 @@ class LeggedRobot(BaseTask):
         self.old_pos[:] = self.root_states[:, :3]
         
         self.contact_forces = gymtorch.wrap_tensor(net_contact_forces).view(self.num_envs, -1, 3) # shape: num_envs, num_bodies, xyz axis
-        print(gymtorch.wrap_tensor(sensor_tensor))
+        print('gymtorch.wrap_tensor(sensor_tensor).shape:',gymtorch.wrap_tensor(sensor_tensor).shape)
+        print("sensor_tensor.shape:", sensor_tensor.shape)
+        print("self.num_envs:", self.num_envs)
 
         self.sensor_forces = gymtorch.wrap_tensor(sensor_tensor).view(self.num_envs, 2, 6)[..., :3]
 
@@ -805,6 +807,7 @@ class LeggedRobot(BaseTask):
         self.num_bodies = len(body_names)
         print('self.num_bodies:',self.num_bodies)
 
+
         self.num_dofs = len(self.dof_names)
         feet_names = [s for s in body_names if self.cfg.asset.foot_name in s]
         penalized_contact_names = []
@@ -824,6 +827,7 @@ class LeggedRobot(BaseTask):
         env_upper = gymapi.Vec3(0., 0., 0.)
         self.actor_handles = []
         self.envs = []
+        self.body_masses = {}
 
         sensor_pose = gymapi.Transform()
         for name in feet_names:
@@ -849,10 +853,14 @@ class LeggedRobot(BaseTask):
             self.gym.set_actor_dof_properties(env_handle, actor_handle, dof_props)
             body_props = self.gym.get_actor_rigid_body_properties(env_handle, actor_handle)
             body_props = self._process_rigid_body_props(body_props, i)
+             # ✅ Store body mass values correctly
+            for j, body_name in enumerate(self.body_names):
+                self.body_masses[body_name] = body_props[j].mass
             self.gym.set_actor_rigid_body_properties(env_handle, actor_handle, body_props, recomputeInertia=True)
             self.envs.append(env_handle)
             self.actor_handles.append(actor_handle)
-
+        # ✅ Compute total robot mass correctly
+        self.robot_mass = sum(self.body_masses.values())
         self.feet_indices = torch.zeros(len(feet_names), dtype=torch.long, device=self.device, requires_grad=False)
         for i in range(len(feet_names)):
             self.feet_indices[i] = self.gym.find_actor_rigid_body_handle(self.envs[0], self.actor_handles[0], feet_names[i])

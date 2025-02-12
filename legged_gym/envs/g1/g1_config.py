@@ -20,18 +20,27 @@ class G1RoughCfg( LeggedRobotCfg ):
            'right_ankle_roll_joint' : 0,       
            'waist_yaw_joint' : 0.,
            'waist_roll_joint' : 0.,
-           'waist_pitch_joint' : 0.
+           'waist_pitch_joint' : 0.,
+           'left_shoulder_pitch_joint': 0.0,
+           'left_shoulder_roll_joint': 0.0,
+           'left_shoulder_yaw_joint': 0.,
+           'left_elbow_joint': 0.6,
+           'right_shoulder_pitch_joint': 0.0,
+           'right_shoulder_roll_joint': 0.0,
+           'right_shoulder_yaw_joint': 0.,
+           'right_elbow_joint': 0.6
         }
     
     class env(LeggedRobotCfg.env):
-        num_fixed_joint = 0
-        num_observations = 47 + 6 - 3 *num_fixed_joint
+        # num_fixed_joint = -1
+
+        num_observations = 11 + 3*num_actions
         # num_observations = 47 + 26 + 187
         # num_observations = 77
-        num_privileged_obs = 50 + 26 + 6 -3*num_fixed_joint
+        num_privileged_obs = 14 + 26 + 3*num_actions
         # num_privileged_obs = 50
 
-        num_actions = 14- num_fixed_joint
+        num_actions = 15
 
     class commands(LeggedRobotCfg.commands):
         curriculum = False
@@ -69,22 +78,31 @@ class G1RoughCfg( LeggedRobotCfg ):
         stiffness = {'hip_yaw': 100,
                      'hip_roll': 100,
                      'hip_pitch': 100,
-                    #  'waist_yaw': 100,
+                     'waist_yaw': 400,
                      'waist_roll': 90,
                      'waist_pitch': 80,
                      'knee': 150,
                      'ankle': 40,
+                     'shoulder_pitch': 90,
+                     'shoulder_roll': 60,
+                     'shoulder_yaw': 20.,
+                     'elbow': 60
                     #  'ankle_pitch': 35,
                     #  'ankle_roll': 30,
                      }  # [N*m/rad]
         damping = {  'hip_yaw': 2,
                      'hip_roll': 2,
                      'hip_pitch': 2,
-                    #  'waist_yaw': 2,
+                     'waist_yaw': 2.5,
                      'waist_roll': 0.8,
                      'waist_pitch': 2,
                      'knee': 4,
                      'ankle': 2,
+                     'shoulder_pitch': 2,
+                     'shoulder_roll': 1,
+                     'shoulder_yaw': 0.4,
+                     'elbow': 1
+
 
                     #  'ankle_pitch': 4,
                     #  'ankle_roll': 2,
@@ -95,7 +113,6 @@ class G1RoughCfg( LeggedRobotCfg ):
         decimation = 4
 
     class asset( LeggedRobotCfg.asset ):
-        # file = '{LEGGED_GYM_ROOT_DIR}/resources/robots/g1_description/g1_15dof_rev_1_0 .urdf'
         file = '{LEGGED_GYM_ROOT_DIR}/resources/robots/g1_description/g1_15dof.urdf'
         # file = '{LEGGED_GYM_ROOT_DIR}/resources/robots/g1_description/g1_15dof_fixed.urdf'
         name = "g1"
@@ -109,10 +126,12 @@ class G1RoughCfg( LeggedRobotCfg ):
         soft_dof_pos_limit = 0.9
         # base_height_target = 0.78
         base_height_target = 0.78
+        locomotion_max_contact_force = 300.0
+        
         
         class scales( LeggedRobotCfg.rewards.scales ):
-            tracking_lin_vel = 1.0
-            tracking_ang_vel = 0.5
+            tracking_lin_vel = 1.5
+            tracking_ang_vel = 1.2
             lin_vel_z = -2.0
             ang_vel_xy = -0.05
             orientation = -1.0
@@ -128,23 +147,24 @@ class G1RoughCfg( LeggedRobotCfg ):
             contact_no_vel = -0.2
             feet_swing_height = -20.0
             contact = 0.18
-            straight_knee = 3
-            # upper_body = 0
-            feet_drag = -0.1
-            # upper_body_roll = 1
-            # center_of_mass_stability = 0.5
-            # minimize_com_velocity = 1.0
+            
+            straight_knee = 4
+            feet_drag = -0.01
+            tracking_torso_roll= 0.8
+            tracking_torso_pitch= 0.5
+            # stabilize_waist_yaw = 0.0001
+            minimize_torso_angular_velocity = 0.4
+            # penalty_ang_vel_xy_torso = -0.1
+            minimize_waist_pitch_deviation = 0.3
+            # penalty_feet_slippage = -0.01
+            # penalty_feet_contact_forces = -0.01
 
-            # upper_body_pitch = 0.1
-            # rpy = 1
-            # tracking_pelvis_roll= 1.0
-            # tracking_waist_roll= 1.5
-            tracking_torso_roll= 1.5
-            # tracking_pelvis_pitch= 1.0
-            # tracking_waist_pitch= 1.0
-            tracking_torso_pitch= 1.0
-            # minimize_upper_body_angular_velocity = 1.0
-            minimize_torso_angular_velocity = 1.0
+            # minimize_whole_body_angular_momentum = 0.1
+            # minimize_angular_momentum_rate = 0.05
+            # minimize_arm_torque = 0.02
+            # stable_standing = 0.01
+            # heel_toe_walking = 0.01
+            # minimize_waist_pitch_deviation = 0.5
             # tracking_roll= 1.5
             # tracking_pitch = 0.5
 

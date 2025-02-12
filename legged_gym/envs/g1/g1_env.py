@@ -55,6 +55,9 @@ class G1Robot(LeggedRobot):
         self._init_upper_body()
         self.base_orn_rp = self.get_body_orientation() # [r, p]
         self.com = self.calculate_upper_body_com_local()
+        # Initialize last whole body angular momentum
+        self.last_whole_body_angular_momentum = torch.zeros((self.num_envs, 3), device=self.device)
+        # self.centroidal_momentum = self._compute_centroidal_momentum()
         
 
 
@@ -134,6 +137,99 @@ class G1Robot(LeggedRobot):
         upper_body_ang_vel_sum = torch.abs(pelvis_ang_vel) + torch.abs(waist_ang_vel) + torch.abs(torso_ang_vel)
 
         return upper_body_ang_vel_sum, pelvis_ang_vel, waist_ang_vel, torso_ang_vel
+
+    
+
+
+    def _compute_centroidal_momentum(self):
+        """
+        Computes the centroidal momentum vector [P, L] using rigid body states and inertia tensors.
+
+        Returns:
+            centroidal_momentum (torch.Tensor): Shape [num_envs, 6], containing [Px, Py, Pz, Lx, Ly, Lz]
+        """
+        num_envs = self.num_envs
+
+        # ✅ Retrieve rigid body states (position, rotation, linear & angular velocity)
+        rb_states = self.gym.acquire_rigid_body_state_tensor(self.sim)
+        rb_states = gymtorch.wrap_tensor(rb_states).view(num_envs, self.num_bodies, 13)
+
+        # ✅ Extract positions, velocities, and angular velocities
+        body_positions = rb_states[:, :, 0:3]    # [num_envs, num_bodies, 3]
+        body_velocities = rb_states[:, :, 7:10]  # [num_envs, num_bodies, 3]
+        body_ang_velocities = rb_states[:, :, 10:13]  # [num_envs, num_bodies, 3]
+
+        # ✅ Retrieve mass of each rigid body
+        body_masses = torch.tensor(
+            [self.body_masses[name] for name in self.body_names], 
+            device=self.device, dtype=torch.float32
+        )  # Shape: [num_bodies]
+
+        # ✅ Compute Center of Mass (CoM) position and velocity
+        total_mass = body_masses.sum()
+        com_position = (body_positions * body_masses[None, :, None]).sum(dim=1) / total_mass
+        com_velocity = (body_velocities * body_masses[None, :, None]).sum(dim=1) / total_mass
+
+        # ✅ Compute Linear Momentum (P)
+        linear_momentum = total_mass * com_velocity  # [num_envs, 3]
+
+        # ✅ Retrieve Rigid Body Inertia Tensors (Assuming Diagonal Inertia)
+        rb_inertias = self.gym.acquire_rigid_body_inertia_tensor(self.sim)
+        rb_inertias = gymtorch.wrap_tensor(rb_inertias).view(num_envs, self.num_bodies, 3)  
+        # Shape: [num_envs, num_bodies, 3] (Ixx, Iyy, Izz)
+
+        # ✅ Retrieve Rotation Matrices to Transform Inertia to World Frame
+        rb_rotations = rb_states[:, :, 3:7]  # Quaternion [x, y, z, w]
+        rb_rotation_matrices = self._quaternion_to_rotation_matrix(rb_rotations)  # Shape [num_envs, num_bodies, 3, 3]
+
+        # ✅ Convert Diagonal Inertia Tensors to Full World-Frame Inertia Matrices
+        I_world = torch.zeros((num_envs, self.num_bodies, 3, 3), device=self.device)
+        for i in range(self.num_bodies):
+            I_body = torch.diag_embed(rb_inertias[:, i, :])  # Convert diagonal tensor to matrix
+            I_world[:, i, :, :] = torch.matmul(
+                torch.matmul(rb_rotation_matrices[:, i, :, :], I_body),  # R * I_body
+                rb_rotation_matrices[:, i, :, :].transpose(-1, -2)  # * R^T
+            )
+
+        # ✅ Compute Angular Momentum (L)
+        angular_momentum = torch.zeros_like(linear_momentum)  # Initialize [num_envs, 3]
+
+        for i in range(self.num_bodies):
+            r = body_positions[:, i, :] - com_position  # Position relative to CoM
+            mass = body_masses[i]
+
+            # ✅ First term: Linear contribution to angular momentum
+            angular_momentum += mass * torch.cross(r, body_velocities[:, i, :])
+
+            # ✅ Second term: Rotational inertia contribution (I * ω)
+            ang_momentum_i = torch.bmm(I_world[:, i, :, :], body_ang_velocities[:, i, :].unsqueeze(-1)).squeeze(-1)
+            angular_momentum += ang_momentum_i  # Add inertia contribution
+
+        # ✅ Combine linear and angular momentum
+        centroidal_momentum = torch.cat([linear_momentum, angular_momentum], dim=1)  # Shape: [num_envs, 6]
+
+        return centroidal_momentum
+
+    def _compute_centroidal_momentum_rate(self):
+        """
+        Computes the rate of change of angular momentum (dot{L}) using:
+            dot{L} = H(q) q̈ + dot{H} q̇
+        
+        Returns:
+            angular_momentum_rate (torch.Tensor): Shape [num_envs, 3] -> (L̇x, L̇y, L̇z)
+        """
+        centroidal_momentum = self._compute_centroidal_momentum()
+        angular_momentum = centroidal_momentum[:, 3:6]  # Extract Lx, Ly, Lz
+
+        if hasattr(self, "last_angular_momentum"):
+            angular_momentum_rate = (angular_momentum - self.last_angular_momentum) / self.dt
+        else:
+            angular_momentum_rate = torch.zeros_like(angular_momentum)
+
+        self.last_angular_momentum = angular_momentum.clone().detach()
+
+        return angular_momentum_rate
+
 
     def _init_upper_body(self):
         """
@@ -307,6 +403,8 @@ class G1Robot(LeggedRobot):
         self.update_feet_state()
         self.update_body_state()
         self.com = self.calculate_upper_body_com_local()
+        # self.centroidal_momentum = self._compute_centroidal_momentum()
+
 
 
         period = 0.8
@@ -375,15 +473,25 @@ class G1Robot(LeggedRobot):
         #                             external_position#3
         #                             ),dim=-1)
         
-        self.obs_buf = torch.cat((  self.base_ang_vel  * self.obs_scales.ang_vel,
-                                    self.projected_gravity,
-                                    self.commands[:, :3] * self.commands_scale,
-                                    (self.dof_pos - self.default_dof_pos) * self.obs_scales.dof_pos,
-                                    self.dof_vel * self.obs_scales.dof_vel,
-                                    self.actions,
-                                    sin_phase,
-                                    cos_phase
+        self.obs_buf = torch.cat((  self.base_ang_vel  * self.obs_scales.ang_vel, #dim = 3
+                                    self.projected_gravity,#dim = 3
+                                    self.commands[:, :3] * self.commands_scale,#dim = 3
+                                    (self.dof_pos - self.default_dof_pos) * self.obs_scales.dof_pos, #dim = num_action/dof
+                                    self.dof_vel * self.obs_scales.dof_vel,#dim = num_action/dof
+                                    self.actions,#dim = num_action/dof
+                                    sin_phase,#dim = 1
+                                    cos_phase#dim = 1
                                     ),dim=-1)
+
+        # print('self.base_ang_vel.shape:',self.base_ang_vel.shape)
+        # print('self.projected_gravity.shape:',self.projected_gravity.shape)
+        # print('self.commands[:, :3].shape:',self.commands[:, :3].shape)
+        # print('self.dof_pos.shape:',self.dof_pos.shape)
+        # print('self.dof_vel.shape:',self.dof_vel.shape)
+        # print('self.actions.shape:',self.actions.shape)
+        # print('sin_phase.shape:',sin_phase.shape)
+        # print('cos_phase.shape:',cos_phase.shape)
+
         self.privileged_obs_buf = torch.cat((  self.base_lin_vel * self.obs_scales.lin_vel,
                                     self.base_ang_vel  * self.obs_scales.ang_vel,
                                     self.projected_gravity,
@@ -460,12 +568,24 @@ class G1Robot(LeggedRobot):
         self.reset_buf |= self.time_out_buf
 
 
+
+
+    #------------ reward functions----------------
     def get_body_orientation(self, return_yaw=False):
         r, p, y = euler_from_quat(self.base_quat)
         if return_yaw:
             return torch.stack([r, p, y], dim=-1)
         else:
             return torch.stack([r, p], dim=-1)
+
+    def _reward_alive(self):
+        # Reward for staying alive
+        return 1.0
+
+
+    # ----------------------------------------------
+    # ✅ 1. Contact & Feet-related Rewards
+    # ----------------------------------------------         
 
     def _reward_contact(self):
         res = torch.zeros(self.num_envs, dtype=torch.float, device=self.device)
@@ -479,39 +599,13 @@ class G1Robot(LeggedRobot):
         contact = torch.norm(self.contact_forces[:, self.feet_indices, :3], dim=2) > 1.
         pos_error = torch.square(self.feet_pos[:, :, 2] - 0.08) * ~contact
         return torch.sum(pos_error, dim=(1))
-    
-    def _reward_alive(self):
-        # Reward for staying alive
-        return 1.0
-    
+
     def _reward_contact_no_vel(self):
         # Penalize contact with no velocity
         contact = torch.norm(self.contact_forces[:, self.feet_indices, :3], dim=2) > 1.
         contact_feet_vel = self.feet_vel * contact.unsqueeze(-1)
         penalize = torch.square(contact_feet_vel[:, :, :3])
         return torch.sum(penalize, dim=(1,2))
-    
-    def _reward_hip_pos(self):
-        return torch.sum(torch.square(self.dof_pos[:,[1,2,7,8]]), dim=1)
-
-    def _reward_straight_knee(self):
-        # Indices for knee joints (left and right knees)
-        knee_indices = [4, 10]  # Indices for left_knee_link and right_knee_link
-        # Penalize deviation from straight knee position, only when the foot is in contact
-        # self.contact_filt should correspond to the contact state of the feet (same order as knee indices)
-        straight_knee_error = torch.square(self.dof_pos[:, knee_indices]) * self.contact_filt[:, :len(knee_indices)]
-        # Return negative reward for deviation (penalty)
-        return -torch.sum(straight_knee_error, dim=1)
-
-    def _reward_upper_body(self):
-        # Indices for knee joints (left and right knees)
-        upper_indices = [12, 13]  # Indices for left_knee_link and right_knee_link
-        # Penalize deviation from straight knee position, only when the foot is in contact
-        # self.contact_filt should correspond to the contact state of the feet (same order as knee indices)
-        
-        upper_error = torch.square(self.dof_pos[:, upper_indices]) 
-        # Return negative reward for deviation (penalty)
-        return -torch.sum(upper_error, dim=1)
 
     def _reward_feet_drag(self):
         # Determine the size of rigid body states
@@ -533,9 +627,80 @@ class G1Robot(LeggedRobot):
 
         return rew
 
-
+    def _reward_feet_edge(self):
+        feet_pos_xy = ((self.rigid_body_states[:, self.feet_indices, :2] + self.terrain.cfg.border_size) / self.cfg.terrain.horizontal_scale).round().long()  # (num_envs, 4, 2)
+        feet_pos_xy[..., 0] = torch.clip(feet_pos_xy[..., 0], 0, self.x_edge_mask.shape[0]-1)
+        feet_pos_xy[..., 1] = torch.clip(feet_pos_xy[..., 1], 0, self.x_edge_mask.shape[1]-1)
+        feet_at_edge = self.x_edge_mask[feet_pos_xy[..., 0], feet_pos_xy[..., 1]]
     
+        self.feet_at_edge = self.contact_filt & feet_at_edge
+        rew = (self.terrain_levels > 3) * torch.sum(self.feet_at_edge, dim=-1)
+        return rew
 
+    def _reward_penalty_feet_contact_forces(self):
+        # penalize high contact forces
+        return torch.sum((torch.norm(self.contact_forces[:, self.feet_indices, :], dim=-1) -  self.cfg.rewards.locomotion_max_contact_force).clip(min=0.), dim=1)
+
+    def _reward_penalty_feet_slippage(self):
+        """
+        Penalizes foot slippage when the feet are in contact with the ground.
+        """
+        # ✅ Extract foot velocities (linear velocity in XYZ)
+        foot_vel = self.rigid_body_states_view[:, self.feet_indices, 7:10]  # Shape: [num_envs, num_feet, 3]
+
+        # ✅ Get contact forces (Z-direction force to check ground contact)
+        foot_contact = torch.norm(self.contact_forces[:, self.feet_indices, :], dim=-1) > 1.0  # Shape: [num_envs, num_feet]
+
+        # ✅ Compute penalty (penalize velocity when contact force is present)
+        penalty = torch.sum(torch.norm(foot_vel, dim=-1) * foot_contact, dim=1)  # Sum over feet
+
+        return penalty
+
+    # ----------------------------------------------
+    # ✅ 2. Posture & Stability Rewards
+    # ----------------------------------------------
+
+
+
+    # def _reward_center_of_mass_stability(self):
+    #     """
+    #     Calculate a reward for maintaining CoM stability in the X and Y directions.
+
+    #     Args:
+    #         weight (float): Weighting factor for the penalty.
+
+    #     Returns:
+    #         torch.Tensor: The reward value.
+    #     """
+    #     # Compute current Center of Mass
+    #     self.com = self.calculate_upper_body_com_local()  # Shape: [num_envs, 3]
+
+    #     # Desired CoM in X and Y (keep Z free)
+    #     desired_com = torch.zeros_like(self.com)  # Default target at [0, 0, free]
+    #     desired_com[:, 2] = self.com[:, 2]  # Keep Z unchanged
+
+        
+    #     rew = torch.exp(-torch.norm(self.com - desired_com, dim=1))
+
+    #     # Reward is the negative penalty, scaled by weight
+    #     return rew   # Higher reward for lower deviation
+
+    def _reward_minimize_com_velocity(self):
+        """
+        Reward to penalize excessive upper body CoM velocity to reduce oscillations.
+
+        Returns:
+            torch.Tensor: Reward values for minimizing CoM velocity.
+        """
+        # Compute the velocity of the upper body CoM
+        com_velocity = self.calculate_upper_body_com_local_velocity()  # Shape: [num_envs, 3]
+
+        # Compute the magnitude of the velocity
+        velocity_magnitude = torch.norm(com_velocity, dim=1)  # Shape: [num_envs]
+
+        # Reward is inversely proportional to the velocity magnitude
+        reward = torch.exp(-velocity_magnitude)  # Higher reward for lower velocity
+        return reward
 
     def _reward_upper_body_roll(self,roll_weight=1.0):
         """
@@ -611,67 +776,91 @@ class G1Robot(LeggedRobot):
 
 
 
-    def _reward_center_of_mass_stability(self):
-        """
-        Calculate a reward for maintaining CoM stability in the X and Y directions.
+    def _reward_hip_pos(self):
+        return torch.sum(torch.square(self.dof_pos[:,[1,2,7,8]]), dim=1)
 
-        Args:
-            weight (float): Weighting factor for the penalty.
+    
+
+    def _reward_upper_body(self):
+        # Indices for knee joints (left and right knees)
+        upper_indices = [12, 13]  # Indices for left_knee_link and right_knee_link
+        # Penalize deviation from straight knee position, only when the foot is in contact
+        # self.contact_filt should correspond to the contact state of the feet (same order as knee indices)
+        
+        upper_error = torch.square(self.dof_pos[:, upper_indices]) 
+        # Return negative reward for deviation (penalty)
+        return -torch.sum(upper_error, dim=1)
+
+
+    def _reward_stabilize_waist_yaw(self):
+        """
+        Computes the reward for stabilizing the waist yaw joint by penalizing
+        excessive yaw velocity and acceleration with an exponential penalty.
 
         Returns:
-            torch.Tensor: The reward value.
+            reward (torch.Tensor): Shape [num_envs], reward values for each environment.
         """
-        # Compute current Center of Mass
-        self.com = self.calculate_upper_body_com_local()  # Shape: [num_envs, 3]
+        # Define reward weights
+        w1, w2 = 0.1, 0.0003  # Tune these values as needed
+        self.waist_yaw_idx = self.dof_names.index('waist_yaw_joint')
+        # ✅ Extract waist yaw joint velocity
+        waist_yaw_velocity = self.dof_vel[:, self.waist_yaw_idx]
 
-        # Desired CoM in X and Y (keep Z free)
-        desired_com = torch.zeros_like(self.com)  # Default target at [0, 0, free]
-        desired_com[:, 2] = self.com[:, 2]  # Keep Z unchanged
-
-        
-        rew = torch.exp(-torch.norm(self.com - desired_com, dim=1))
-
-        # Reward is the negative penalty, scaled by weight
-        return rew   # Higher reward for lower deviation
+        # ✅ Exponential penalty for excessive yaw movement
+        r_yaw_stability = - (torch.square(waist_yaw_velocity))
 
 
-    def _reward_minimize_com_velocity(self):
+        # ✅ Exponential penalty for sudden yaw acceleration
+        r_yaw_smoothness = - torch.square((self.last_dof_vel[:, self.waist_yaw_idx] - self.dof_vel[:, self.waist_yaw_idx]) / self.dt)
+        # ✅ Compute final reward
+        reward = w1 * r_yaw_stability + w2 * r_yaw_smoothness
+
+
+        return reward
+
+
+
+
+    def _reward_minimize_waist_pitch_deviation(self, target_pitch=0.0, weight=1.0, log=False):
         """
-        Penalize excessive movement of the upper body CoM to reduce oscillation.
+        Penalize deviation of waist_pitch_joint from a target angle.
+
+        Args:
+            target_pitch (float): Desired waist pitch angle in radians (default: 0.0).
+            weight (float): Scaling factor for the reward (default: 1.0).
+            log (bool): Whether to log the deviation (default: False).
+
+        Returns:
+            torch.Tensor: Reward value for minimizing waist pitch deviation.
         """
-        com_velocity = self.com - self.prev_com  # Change in CoM between steps
-        self.prev_com = self.com.clone()  # Store current CoM for the next step
+        self.waist_pitch_index = self.dof_names.index('waist_pitch_joint')  # Rotates around Y-axis
 
-        rew = torch.exp(-torch.norm(com_velocity, dim=1))  # Penalize large velocity
-        return rew
+        # Extract waist pitch joint angle
+        waist_pitch_angle = self.dof_pos[:, self.waist_pitch_index]  # [num_envs]
 
+        # Compute penalty for deviation from target pitch
+        deviation_penalty = torch.abs(waist_pitch_angle - target_pitch)  # Absolute deviation
 
-    
-    def _reward_feet_edge(self):
-        feet_pos_xy = ((self.rigid_body_states[:, self.feet_indices, :2] + self.terrain.cfg.border_size) / self.cfg.terrain.horizontal_scale).round().long()  # (num_envs, 4, 2)
-        feet_pos_xy[..., 0] = torch.clip(feet_pos_xy[..., 0], 0, self.x_edge_mask.shape[0]-1)
-        feet_pos_xy[..., 1] = torch.clip(feet_pos_xy[..., 1], 0, self.x_edge_mask.shape[1]-1)
-        feet_at_edge = self.x_edge_mask[feet_pos_xy[..., 0], feet_pos_xy[..., 1]]
-    
-        self.feet_at_edge = self.contact_filt & feet_at_edge
-        rew = (self.terrain_levels > 3) * torch.sum(self.feet_at_edge, dim=-1)
-        return rew
+        # Log deviation for debugging
+        if log:
+            print(f"Waist Pitch Deviation: {torch.mean(deviation_penalty).item()}")
 
+        # Compute final reward (exponential penalty with weight)
+        reward = weight * torch.exp(-2.0 * deviation_penalty)
+
+        return reward
 
     def _reward_tracking_pelvis_roll(self):
-
         
         demo_roll = torch.zeros(self.num_envs, 1, device = self.device)
         rew = torch.exp(-torch.norm(self.pelvis_roll - demo_roll, dim=1))
         return rew
     def _reward_tracking_torso_roll(self):
-
         
         demo_roll = torch.zeros(self.num_envs, 1, device = self.device)
         rew = torch.exp(-torch.norm(self.torso_roll - demo_roll, dim=1))
         return rew
     def _reward_tracking_waist_roll(self):
-
         
         demo_roll = torch.zeros(self.num_envs, 1, device = self.device)
         rew = torch.exp(-torch.norm(self.waist_roll - demo_roll, dim=1))
@@ -679,21 +868,18 @@ class G1Robot(LeggedRobot):
     
 
     def _reward_tracking_pelvis_pitch(self):
-
         
         demo_pitch = torch.zeros(self.num_envs, 1, device = self.device)
         rew = torch.exp(-torch.norm(self.pelvis_pitch - demo_pitch, dim=1))
         return rew
 
     def _reward_tracking_torso_pitch(self):
-
         
         demo_pitch = torch.zeros(self.num_envs, 1, device = self.device)
         rew = torch.exp(-torch.norm(self.torso_pitch - demo_pitch, dim=1))
         return rew
     def _reward_tracking_waist_pitch(self):
 
-        
         demo_pitch = torch.zeros(self.num_envs, 1, device = self.device)
         rew = torch.exp(-torch.norm(self.waist_pitch - demo_pitch, dim=1))
         return rew
@@ -709,25 +895,6 @@ class G1Robot(LeggedRobot):
         rew = torch.exp(-torch.norm(cur_roll_pitch - demo_roll_pitch, dim=1))
         return rew
 
-
-    # def _reward_minimize_upper_body_angular_velocity(self):
-    #     """
-    #     Penalize large angular velocities in the upper body to stabilize motion.
-
-    #     Returns:
-    #         torch.Tensor: The reward value for minimizing angular velocity.
-    #     """
-    #     _, pelvis_ang_vel, waist_ang_vel, torso_ang_vel = self._extract_upper_body_angular_velocity()
-
-    #     # Combine all angular velocities
-    #     upper_body_ang_vel = torch.cat([pelvis_ang_vel, waist_ang_vel, torso_ang_vel], dim=1)  # Shape: [num_envs, 9]
-
-    #     # Compute penalty for angular velocity magnitude
-    #     angular_velocity_penalty = torch.norm(upper_body_ang_vel, dim=1)  # Shape: [num_envs]
-
-    #     # Reward is inversely proportional to the penalty
-    #     reward = torch.exp(-angular_velocity_penalty)  # Penalize high angular velocity
-    #     return reward
     def _reward_minimize_torso_angular_velocity(self):
         """
         Penalize large angular velocities in the upper body to stabilize motion.
@@ -746,125 +913,192 @@ class G1Robot(LeggedRobot):
         return reward
 
 
-    def _reward_minimize_com_velocity(self):
+    def _reward_penalty_ang_vel_xy_torso(self):
         """
-        Reward to penalize excessive upper body CoM velocity to reduce oscillations.
-
-        Returns:
-            torch.Tensor: Reward values for minimizing CoM velocity.
+        Penalize high angular velocity in the XY plane for the torso.
+        This helps stabilize the upper body by reducing excessive rotation.
         """
-        # Compute the velocity of the upper body CoM
-        com_velocity = self.calculate_upper_body_com_local_velocity()  # Shape: [num_envs, 3]
 
-        # Compute the magnitude of the velocity
-        velocity_magnitude = torch.norm(com_velocity, dim=1)  # Shape: [num_envs]
+        # ✅ Extract torso quaternion & angular velocity
+        _, _, _, torso_rpy = self._extract_upper_body_rpy()
 
-        # Reward is inversely proportional to the velocity magnitude
-        reward = torch.exp(-velocity_magnitude)  # Higher reward for lower velocity
-        return reward
+        # ✅ Get torso angular velocity (already in world frame)
+        torso_ang_vel = self.rigid_body_states_view[:, self.body_names.index('torso_link'), 10:13]  # Shape: [num_envs, 3]
 
+        # ✅ Transform angular velocity to torso frame
+        torso_ang_vel_local = quat_rotate_inverse(torso_rpy, torso_ang_vel)
+
+        # ✅ Penalize XY angular velocity
+        penalty = torch.sum(torch.square(torso_ang_vel_local[:, :2]), dim=1)  # Penalize X & Y, ignore Z
+
+        return penalty
+
+
+    # ----------------------------------------------
+    # ✅ 5. Gait-related Rewards
+    # ----------------------------------------------
+    def _reward_straight_knee(self):
+        # Indices for knee joints (left and right knees)
+        self.left_knee_index = self.dof_names.index('left_knee_joint')  
+        self.right_knee_index = self.dof_names.index('right_knee_joint')  
+
+        knee_indices = [self.left_knee_index, self.right_knee_index]  # Indices for left_knee_link and right_knee_link
+        # Penalize deviation from straight knee position, only when the foot is in contact
+        # self.contact_filt should correspond to the contact state of the feet (same order as knee indices)
+        straight_knee_error = torch.square(self.dof_pos[:, knee_indices]) * self.contact_filt[:, :len(knee_indices)]
+        # Return negative reward for deviation (penalty)
+        return -torch.sum(straight_knee_error, dim=1)
+
+
+    def _reward_stable_standing(self):
+        """
+        Encourage the robot to remain stable when given a zero velocity command.
+        Penalizes unnecessary foot movement while standing still.
+        """
+
+        # ✅ Retrieve foot velocities (XY-plane)
+        left_foot_velocity = torch.norm(self.rigid_body_states_view[:, self.feet_indices[0], 7:9], dim=-1)
+        right_foot_velocity = torch.norm(self.rigid_body_states_view[:, self.feet_indices[1], 7:9], dim=-1)
+
+        # ✅ Retrieve commanded velocity (should be zero if standing still)
+        commanded_lin_vel = torch.norm(self.commands[:, :2], dim=-1)  # XY velocity
+
+        # ✅ Compute reward for minimizing foot movement when standing still
+        standing_reward = torch.exp(-10.0 * (left_foot_velocity + right_foot_velocity))  # Penalize foot movement
+
+        # ✅ Reduce reward if commanded velocity is nonzero (don't penalize walking)
+        standing_reward *= (commanded_lin_vel < 0.05).float()
+
+        return standing_reward
+
+
+
+    def _reward_heel_toe_walking(self):
+        """
+        Encourage heel-strike and toe-off walking behavior.
+        Penalizes flat-footed landing or incorrect foot placement.
+        """
+
+        # ✅ Get foot quaternions (orientation)
+        left_foot_quat = self.rigid_body_states_view[:, self.feet_indices[0], 3:7]  # Left foot orientation (quaternion)
+        right_foot_quat = self.rigid_body_states_view[:, self.feet_indices[1], 3:7]  # Right foot orientation (quaternion)
+
+        # ✅ Compute foot orientation relative to gravity
+        left_foot_up = quat_rotate_inverse(left_foot_quat, self.gravity_vec)  # Maps quaternion to gravity frame
+        right_foot_up = quat_rotate_inverse(right_foot_quat, self.gravity_vec)
+
+        # ✅ Extract roll and pitch angles (important for detecting heel-strike and toe-off)
+        left_foot_pitch = torch.atan2(left_foot_up[:, 1], left_foot_up[:, 2])
+        right_foot_pitch = torch.atan2(right_foot_up[:, 1], right_foot_up[:, 2])
+
+        # ✅ Compute foot contact forces (check if feet are on the ground)
+        left_contact = self.contact_forces[:, self.feet_indices[0], 2] > 1.0
+        right_contact = self.contact_forces[:, self.feet_indices[1], 2] > 1.0
+
+        # ✅ Heel-strike reward (encourage negative pitch at initial contact)
+        left_heel_strike = left_contact * torch.clamp(left_foot_pitch, max=0)  # Encourage negative pitch (heel down)
+        right_heel_strike = right_contact * torch.clamp(right_foot_pitch, max=0)
+
+        # ✅ Toe-off reward (encourage positive pitch before lifting)
+        left_toe_off = ~left_contact * torch.clamp(left_foot_pitch, min=0)  # Encourage positive pitch (toe up)
+        right_toe_off = ~right_contact * torch.clamp(right_foot_pitch, min=0)
+
+        # ✅ Combine both rewards
+        reward = left_heel_strike + right_heel_strike + left_toe_off + right_toe_off
+
+        return torch.exp(reward)  # Reward is higher when correct heel-toe behavior occurs
 
     
 
+    # ----------------------------------------------
+    # ✅ 4. Arm-related Rewards
+    # ----------------------------------------------
+    
+    def _reward_minimize_arm_torque(self):
+        """
+        Penalize excessive torque applied to shoulder and elbow joints.
+        """
 
-    def init_motions(self, cfg):
-        self._key_body_ids = torch.tensor([3, 6, 9, 12], device=self.device)  #self._build_key_body_ids_tensor(key_bodies)
-        # ['pelvis', 'left_hip_yaw_link', 'left_hip_roll_link', 'left_hip_pitch_link', 'left_knee_link', 'left_ankle_link', 
-        # 'right_hip_yaw_link', 'right_hip_roll_link', 'right_hip_pitch_link', 'right_knee_link', 'right_ankle_link', 
-        # 'torso_link', 
-        # 'left_shoulder_pitch_link', 'left_shoulder_roll_link', 'left_shoulder_yaw_link', 'left_elbow_link', 'left_hand_keypoint_link', 
-        # 'right_shoulder_pitch_link', 'right_shoulder_roll_link', 'right_shoulder_yaw_link', 'right_elbow_link', 'right_hand_keypoint_link']
-        self._key_body_ids_sim = torch.tensor([1, 4, 5, # Left Hip yaw, Knee, Ankle
-                                               6, 9, 10,
-                                               12, 15, 16, # Left Shoulder pitch, Elbow, hand
-                                               17, 20, 21], device=self.device)
-        self._key_body_ids_sim_subset = torch.tensor([6, 7, 8, 9, 10, 11], device=self.device)  # no knee and ankle
-        
-        self._num_key_bodies = len(self._key_body_ids_sim_subset)
-        self._dof_body_ids = [1, 2, 3, # Hip, Knee, Ankle
-                              4, 5, 6,
-                              7,       # Torso
-                              8, 9, 10, # Shoulder, Elbow, Hand
-                              11, 12, 13]  # 13
-        self._dof_offsets = [0, 3, 4, 5, 8, 9, 10, 
-                             11, 
-                             14, 15, 16, 19, 20, 21]  # 14
-        self._valid_dof_body_ids = torch.ones(len(self._dof_body_ids)+2*4, device=self.device, dtype=torch.bool)
-        self._valid_dof_body_ids[-1] = 0
-        self._valid_dof_body_ids[-6] = 0
-        self.dof_indices_sim = torch.tensor([0, 1, 2, 5, 6, 7, 11, 12, 13, 16, 17, 18], device=self.device, dtype=torch.long)
-        self.dof_indices_motion = torch.tensor([2, 0, 1, 7, 5, 6, 12, 11, 13, 17, 16, 18], device=self.device, dtype=torch.long)
-        
-        # self._dof_ids_subset = torch.tensor([0, 1, 2, 5, 6, 7, 10, 11, 12, 13, 14, 15, 16, 17, 18], device=self.device)  # no knee and ankle
-        self._dof_ids_subset = torch.tensor([10, 11, 12, 13, 14, 15, 16, 17, 18], device=self.device)  # no knee and ankle
-        self._n_demo_dof = len(self._dof_ids_subset)
+        self.left_shoulder_pitch_idx = self.dof_names.index('left_shoulder_pitch_joint')
+        self.right_shoulder_pitch_idx = self.dof_names.index('right_shoulder_pitch_joint')
+        # ✅ Extract torque values
+        left_shoulder_torque = torch.abs(self.torques[:, self.left_shoulder_pitch_idx])
+        right_shoulder_torque = torch.abs(self.torques[:, self.right_shoulder_pitch_idx])
+        left_elbow_torque = torch.zeros_like(left_shoulder_torque)
+        right_elbow_torque = torch.zeros_like(right_shoulder_torque)
+        # left_elbow_torque = torch.abs(self.torques[:, self.left_elbow_idx])
+        # right_elbow_torque = torch.abs(self.torques[:, self.right_elbow_idx])
 
-        #['left_hip_yaw_joint', 'left_hip_roll_joint', 'left_hip_pitch_joint', 
-        #'left_knee_joint', 'left_ankle_joint', 
-        #'right_hip_yaw_joint', 'right_hip_roll_joint', 'right_hip_pitch_joint', 
-        #'right_knee_joint', 'right_ankle_joint', 
-        #'torso_joint', 
-        #'left_shoulder_pitch_joint', 'left_shoulder_roll_joint', 'left_shoulder_yaw_joint', 'left_elbow_joint', 
-        #'right_shoulder_pitch_joint', 'right_shoulder_roll_joint', 'right_shoulder_yaw_joint', 'right_elbow_joint']
-        # self.dof_ids_subset = torch.tensor([0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18], device=self.device, dtype=torch.long)
-        # motion_name = "17_04_stealth"
-        if cfg.motion.motion_type == "single":
-            motion_file = os.path.join(ASE_DIR, f"ase/poselib/data/retarget_npy/{cfg.motion.motion_name}.npy")
-        else:
-            assert cfg.motion.motion_type == "yaml"
-            motion_file = os.path.join(ASE_DIR, f"ase/poselib/data/configs/{cfg.motion.motion_name}")
-        
-        self._load_motion(motion_file, cfg.motion.no_keybody)
+        # ✅ Compute total arm torque (sum of absolute values)
+        total_arm_torque = (left_shoulder_torque + right_shoulder_torque + left_elbow_torque + right_elbow_torque)
+
+        # ✅ Normalize for stability
+        total_arm_torque = total_arm_torque / self.num_envs
+
+        # ✅ Convert to reward (higher reward for lower torque)
+        return torch.exp(-0.5 * total_arm_torque)  # Scale for better gradient response
+    
+
+    def _reward_minimize_whole_body_angular_momentum(self):
+        """
+        Reward function to minimize whole-body angular momentum, encouraging natural arm swing.
+        """
+
+        # ✅ Compute centroidal angular momentum L
+        centroidal_momentum = self._compute_centroidal_momentum()
+        whole_body_angular_momentum = centroidal_momentum[:, 3:6]  # Extract Lx, Ly, Lz
+
+        # ✅ Penalize large whole-body angular momentum
+        reward = -torch.norm(whole_body_angular_momentum, dim=1)
+
+        return torch.exp(reward)  # Higher reward when L is small
 
 
-    def init_motion_buffers(self, cfg):
-        num_motions = self._motion_lib.num_motions()
-        self._motion_ids = torch.arange(self.num_envs, device=self.device, dtype=torch.long)
-        self._motion_ids = torch.remainder(self._motion_ids, num_motions)
-        if cfg.motion.motion_curriculum:
-            self._max_motion_difficulty = 9
-            # self._motion_ids = self._motion_lib.sample_motions(self.num_envs, self._max_motion_difficulty)
-        else:
-            self._max_motion_difficulty = 9
-        self._motion_times = self._motion_lib.sample_time(self._motion_ids)
-        self._motion_lengths = self._motion_lib.get_motion_length(self._motion_ids)
-        self._motion_difficulty = self._motion_lib.get_motion_difficulty(self._motion_ids)
-        # self._motion_features = self._motion_lib.get_motion_features(self._motion_ids)
 
-        self._motion_dt = self.dt
-        self._motion_num_future_steps = self.cfg.env.n_demo_steps
-        self._motion_demo_offsets = torch.arange(0, self.cfg.env.n_demo_steps * self.cfg.env.interval_demo_steps, self.cfg.env.interval_demo_steps, device=self.device)
-        self._demo_obs_buf = torch.zeros((self.num_envs, self.cfg.env.n_demo_steps, self.cfg.env.n_demo), device=self.device)
-        self._curr_demo_obs_buf = self._demo_obs_buf[:, 0, :]
-        self._next_demo_obs_buf = self._demo_obs_buf[:, 1, :]
-        # self._curr_mimic_obs_buf = torch.zeros_like(self._curr_demo_obs_buf, device=self.device)
+    def _reward_minimize_angular_momentum_rate(self):
+        """
+        Reward function to encourage smoother arm movements by minimizing the rate of change of angular momentum (dot{L}).
+        """
 
-        self._curr_demo_root_pos = torch.zeros((self.num_envs, 3), device=self.device)
-        self._curr_demo_quat = torch.zeros((self.num_envs, 4), device=self.device)
-        self._curr_demo_root_vel = torch.zeros((self.num_envs, 3), device=self.device)
-        self._curr_demo_keybody = torch.zeros((self.num_envs, self._num_key_bodies, 3), device=self.device)
-        self._in_place_flag = torch.zeros(self.num_envs, device=self.device, dtype=torch.bool)
+        # ✅ Compute the rate of change of angular momentum (L̇)
+        angular_momentum_rate = self._compute_centroidal_momentum_rate()  # Shape: [num_envs, 3]
 
-        self.dof_term_threshold = 3 * torch.ones(self.num_envs, device=self.device)
-        self.keybody_term_threshold = 0.3 * torch.ones(self.num_envs, device=self.device)
-        self.yaw_term_threshold = 0.5 * torch.ones(self.num_envs, device=self.device)
-        self.height_term_threshold = 0.2 * torch.ones(self.num_envs, device=self.device)
+        # ✅ Penalize large changes in angular momentum
+        reward = -torch.norm(angular_momentum_rate, dim=1)  # Minimize sudden momentum changes
 
-        # self.step_inplace_ids = self.resample_step_inplace_ids()
-        
+        return torch.exp(reward)  # Higher reward when L̇ is small
 
-    def _load_motion(self, motion_file, no_keybody=False):
-        # assert(self._dof_offsets[-1] == self.num_dof + 2)  # +2 for hand dof not used
-        self._motion_lib = MotionLib(motion_file=motion_file,
-                                     dof_body_ids=self._dof_body_ids,
-                                     dof_offsets=self._dof_offsets,
-                                     key_body_ids=self._key_body_ids.cpu().numpy(), 
-                                     device=self.device, 
-                                     no_keybody=no_keybody, 
-                                     regen_pkl=self.cfg.motion.regen_pkl)
-        return
+    
 
-    def update_motion_ids(self, env_ids):
-        self._motion_times[env_ids] = self.resample_motion_times(env_ids)
-        self._motion_lengths[env_ids] = self._motion_lib.get_motion_length(self._motion_ids[env_ids])
-        self._motion_difficulty[env_ids] = self._motion_lib.get_motion_difficulty(self._motion_ids[env_ids])
+    
+
+    def _reward_arm_leg_coordination(self):
+        """
+        Reward function to encourage inverse-phase movement of arms and legs.
+        """
+        # Extract velocities of hip and shoulder
+        self.left_hip_pitch_idx = self.dof_names.index('left_hip_pitch_joint')
+        self.right_hip_pitch_idx = self.dof_names.index('right_hip_pitch_joint')
+        self.left_shoulder_pitch_idx = self.dof_names.index('left_shoulder_pitch_joint')
+        self.right_shoulder_pitch_idx = self.dof_names.index('right_shoulder_pitch_joint')
+
+
+
+        left_leg_vel = self.dof_vel[:, self.left_hip_pitch_idx]  # Left hip pitch velocity
+        right_leg_vel = self.dof_vel[:, self.right_hip_pitch_idx]  # Right hip pitch velocity
+
+        left_arm_vel = self.dof_vel[:, self.left_shoulder_pitch_idx]  # Left shoulder pitch velocity
+        right_arm_vel = self.dof_vel[:, self.right_shoulder_pitch_idx]  # Right shoulder pitch velocity
+
+        # Compute correlation (negative means opposite movement)
+        coordination = -(left_leg_vel * left_arm_vel + right_leg_vel * right_arm_vel)
+
+        return torch.exp(coordination)  # Higher reward when arms and legs are in opposite phase
+    
+    
+    
+    
+    
+
+
+    

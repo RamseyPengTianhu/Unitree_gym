@@ -441,22 +441,22 @@
 
   <!-- Torso -->
   <link name="waist_yaw_link">
-    <inertial>
-      <origin xyz="0.003494 0.000233 0.018034" rpy="0 0 0"/>
-      <mass value="0.214"/>
-      <inertia ixx="0.00010673" ixy="2.703E-06" ixz="-7.631E-06" iyy="0.00010422" iyz="-2.01E-07" izz="0.0001625"/>
+  <inertial>
+      <origin xyz="0.003964 0 0.018769" rpy="0 0 0"/>
+      <mass value="0.244"/>
+      <inertia ixx="9.9587E-05" ixy="-1.833E-06" ixz="-1.2617E-05" iyy="0.00012411" iyz="-1.18E-07" izz="0.00015586"/>
     </inertial>
     <visual>
       <origin xyz="0 0 0" rpy="0 0 0"/>
       <geometry>
-        <mesh filename="meshes/waist_yaw_link_rev_1_0.STL"/>
+        <mesh filename="meshes/waist_yaw_link.STL"/>
       </geometry>
       <material name="white">
         <color rgba="0.7 0.7 0.7 1"/>
       </material>
     </visual>
   </link>
-  <joint name="waist_yaw_joint" type="fixed">
+  <joint name="waist_yaw_joint" type="revolute">
     <origin xyz="0 0 0" rpy="0 0 0"/>
     <parent link="pelvis"/>
     <child link="waist_yaw_link"/>

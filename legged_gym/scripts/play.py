@@ -346,6 +346,59 @@ def plot_joint_and_orientation_every_100_steps(state_log, save_dir="plots"):
 
         print(f"Plots saved for steps {start_step}-{end_step}")
 
+
+def plot_shoulder_pitch_joints(state_log, save_path=None):
+    """
+    Plot the left and right shoulder pitch joint angles over time, along with hip pitch joints.
+
+    Args:
+        state_log (dict): Dictionary containing the logged joint angle data.
+        save_path (str, optional): Path to save the plot. If None, the plot is displayed.
+    """
+
+    # Helper function to convert tensors to NumPy safely
+    def to_numpy(tensor):
+        if isinstance(tensor, torch.Tensor):
+            return tensor.cpu().numpy()
+        return np.array(tensor)
+
+    plt.figure(figsize=(10, 6))
+
+    # ✅ Extract and plot left shoulder pitch joint
+    if "left_shoulder_pitch_joint" in state_log:
+        left_shoulder_pitch = to_numpy(state_log["left_shoulder_pitch_joint"])
+        plt.plot(left_shoulder_pitch, label="Left Shoulder Pitch", color="b", linestyle="-")
+
+    # ✅ Extract and plot right shoulder pitch joint
+    if "right_shoulder_pitch_joint" in state_log:
+        right_shoulder_pitch = to_numpy(state_log["right_shoulder_pitch_joint"])
+        plt.plot(right_shoulder_pitch, label="Right Shoulder Pitch", color="r", linestyle="--")
+
+    # ✅ Extract and plot left hip pitch joint (Fixed variable)
+    if "left_hip_pitch_joint" in state_log:
+        left_hip_pitch = to_numpy(state_log["left_hip_pitch_joint"])
+        plt.plot(left_hip_pitch, label="Left Hip Pitch", color="g", linestyle=":")
+
+    # ✅ Extract and plot right hip pitch joint (Fixed incorrect key name)
+    if "right_hip_pitch_joint" in state_log:  # Fixed KeyError
+        right_hip_pitch = to_numpy(state_log["right_hip_pitch_joint"])
+        plt.plot(right_hip_pitch, label="Right Hip Pitch", color="m", linestyle=":")
+
+    # Formatting
+    plt.xlabel("Time Steps")
+    plt.ylabel("Joint Angle (Radians)")
+    plt.title("Shoulder & Hip Pitch Joint Angles Over Time")
+    plt.legend()
+    plt.grid(True, linestyle="--", alpha=0.6)
+
+    # ✅ Save or show the plot
+    if save_path:
+        plt.savefig(save_path, dpi=300, bbox_inches="tight")
+        print(f"📊 Shoulder & Hip Pitch Joint plot saved to {save_path}")
+    else:
+        plt.show()
+
+   
 def play(args):
     env_cfg, train_cfg = task_registry.get_cfgs(name=args.task)
     # Override some parameters for testing
@@ -361,7 +414,10 @@ def play(args):
     env_cfg.env.test = True
     robot_index = 0  # Index of the robot to track
     stop_state_log = 1000 # Number of steps for logging
+    start_state_log = 500
     joint_index = 4
+    
+
     # Indices for the upper body links
 
     # Side View (Default)
@@ -378,7 +434,10 @@ def play(args):
     obs = env.get_observations()
     logger = Logger(env.dt)
     stop_rew_log = env.max_episode_length + 1  # Steps for average reward calculation
-
+    # left_shoulder_pitch_index = env.dof_names.index('left_shoulder_pitch_joint')
+    # right_shoulder_pitch_index = env.dof_names.index('right_shoulder_pitch_joint')
+    left_hip_pitch_index = env.dof_names.index('left_hip_pitch_joint')
+    right_hip_pitch_index = env.dof_names.index('right_hip_pitch_joint')
 
 
 
@@ -431,9 +490,9 @@ def play(args):
         # Update the camera position dynamically
         if MOVE_CAMERA:
             # update_camera_position(env, robot_index, camera_offset)
-            # update_camera_position(env, robot_index, view_mode="front")  # Front view
+            update_camera_position(env, robot_index, view_mode="front")  # Front view
             # update_camera_position(env, robot_index, view_mode="back")   # Back view
-            update_camera_position(env, robot_index, view_mode="side")   # Side view (default)
+            # update_camera_position(env, robot_index, view_mode="side")   # Side view (default)
 
         # Optional: Add logic for rendering or saving frames if needed
         if RECORD_FRAMES and i % 2 == 0:
@@ -441,7 +500,7 @@ def play(args):
             env.gym.write_viewer_image_to_file(env.viewer, filename)
 
         # Logging states
-        if i < stop_state_log:
+        if start_state_log <= i < stop_state_log:
             logger.log_states(
                 {
 
@@ -457,7 +516,11 @@ def play(args):
                     'waist_roll': waist_roll,
                     'torso_roll': torso_roll,
                     'torso_pitch': torso_pitch,
-                    'com_x':com_x,
+                    # 'left_shoulder_pitch_joint': env.dof_pos[robot_index, left_shoulder_pitch_index].item(),
+                    # 'right_shoulder_pitch_joint': env.dof_pos[robot_index, right_shoulder_pitch_index].item(),
+                    'left_hip_pitch_joint': env.dof_pos[robot_index, left_hip_pitch_index].item(),
+                    'right_hip_pitch_joint': env.dof_pos[robot_index, right_hip_pitch_index].item(),
+                    
                     'com_y':com_y,
                     'dof_pos_target': actions[robot_index, joint_index].item() * env.cfg.control.action_scale,
                     'dof_pos': env.dof_pos[robot_index, joint_index].item(),
@@ -479,7 +542,7 @@ def play(args):
                 }
             )
         elif i == stop_state_log:
-            logger.plot_states()
+            # logger.plot_states()
             # plot_deviations(logger.state_log, save_path='/home/tianhu/unitree_rl_gym/logs/upper_body_deviations.png')
             plot_upper_body_orientation(
             logger.state_log, 
@@ -499,6 +562,10 @@ def play(args):
             save_dir='/home/tianhu/unitree_rl_gym/logs/upper_body_plots'
     )
 
+            plot_shoulder_pitch_joints(
+            logger.state_log, 
+            save_path='/home/tianhu/unitree_rl_gym/logs/shoulder_pitch_joint.png'
+    )
             pass
 
         # Logging rewards
